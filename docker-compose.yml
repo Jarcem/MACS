@@ -1,0 +1,21 @@
+# MACS 本地依赖栈（P0-3）：PostgreSQL 15（云端库，可选；缺省时 macs-tower 自动降级 SQLite，V3.4 决策）
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: macs-postgres
+    environment:
+      POSTGRES_USER: macs
+      POSTGRES_PASSWORD: macs_dev_only
+      POSTGRES_DB: macs_tower
+    ports:
+      - "5432:5432"
+    volumes:
+      - macs_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U macs -d macs_tower"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  macs_pg_data:

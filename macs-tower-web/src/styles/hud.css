@@ -1,0 +1,306 @@
+/* MACS HUD 主题（深色版）— 蓝绿终端风 / 深底不透明面板 / 零位图
+   深底写死 #0a1118（不依赖宿主背板），面板用不透明深色分层，
+   语义色沿用 §14.7，色值按深底对比度选定。 */
+
+:root {
+  color-scheme: dark;
+  --hud-bg-base: #0a1118;
+  --hud-bg-panel: #101c26;
+  --hud-bg-raised: #142532;
+  --hud-bg-head: #0e1b25;
+  --hud-line: #1f3d4a;
+  --hud-line-soft: #17303c;
+  --hud-cyan: #35d6ee;
+  --hud-green: #33e0a1;
+  --hud-amber: #ffb454;
+  --hud-red: #ff6b81;
+  --hud-violet: #b79bff;
+  --hud-text: #d7eef5;
+  --hud-text-dim: #7f9aa6;
+  --hud-glow-cyan: 0 0 8px rgba(53, 214, 238, 0.35);
+  --hud-font-mono: "JetBrains Mono", "Cascadia Code", "Sarasa Mono SC", Consolas, ui-monospace, monospace;
+}
+
+html, body {
+  margin: 0;
+  background: var(--hud-bg-base);
+  color: var(--hud-text);
+  font-family: var(--hud-font-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.page {
+  min-height: 100vh;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 20px 20px 48px;
+  background: var(--hud-bg-base);
+}
+
+/* 页头：标题 + 关键指标，一条青色分隔线 */
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 20px;
+  flex-wrap: wrap;
+  border-bottom: 2px solid rgba(53, 214, 238, 0.45);
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 2px;
+  color: var(--hud-cyan);
+  text-shadow: var(--hud-glow-cyan);
+}
+
+.page-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--hud-text-dim);
+}
+
+.kpis {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.kpi {
+  min-width: 108px;
+  padding: 8px 12px;
+  background: var(--hud-bg-panel);
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+}
+
+.kpi-label {
+  font-size: 11px;
+  color: var(--hud-text-dim);
+}
+
+.kpi-value {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+/* 面板 */
+.hud-panel {
+  background: var(--hud-bg-panel);
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  letter-spacing: 1px;
+  color: var(--hud-cyan);
+}
+
+.panel-title::before {
+  content: "▸";
+}
+
+.panel-note {
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--hud-text-dim);
+}
+
+/* 表格 */
+.hud-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.hud-table th {
+  text-align: left;
+  padding: 6px 8px;
+  font-weight: 500;
+  color: var(--hud-text-dim);
+  background: var(--hud-bg-head);
+  border-bottom: 1px solid var(--hud-line);
+}
+
+.hud-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--hud-line-soft);
+}
+
+.hud-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.hud-table tbody tr:hover td {
+  background: var(--hud-bg-raised);
+}
+
+/* 状态色（§14.7 语义不变） */
+.hud-running   { color: var(--hud-green); font-weight: 600; }
+.hud-completed { color: var(--hud-cyan); }
+.hud-failed    { color: var(--hud-red); font-weight: 600; }
+.hud-frozen    { color: var(--hud-text-dim); }
+.hud-pending   { color: var(--hud-text-dim); }
+.hud-checking  { color: var(--hud-amber); }
+.hud-reviewing { color: var(--hud-violet); }
+
+/* 集群拓扑 */
+.topology {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tower-node {
+  align-self: center;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--hud-green);
+  background: var(--hud-bg-raised);
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+}
+
+.incubator-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 24px;
+}
+
+.incubator-edge {
+  color: var(--hud-cyan);
+  font-size: 12px;
+}
+
+.incubator-node {
+  flex: 1;
+  padding: 8px 14px;
+  font-size: 12px;
+  background: var(--hud-bg-raised);
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+}
+
+.hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--hud-text-dim);
+}
+
+.mono-dim {
+  color: var(--hud-text-dim);
+}
+
+/* 任务编排：提交表单 + 任务卡片 + 进度条 */
+.task-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.task-form input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--hud-text);
+  background: var(--hud-bg-head);
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+  outline: none;
+}
+
+.task-form input:focus {
+  border-color: var(--hud-cyan);
+}
+
+.task-form input::placeholder {
+  color: var(--hud-text-dim);
+}
+
+.task-form button {
+  padding: 7px 16px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--hud-cyan);
+  background: var(--hud-bg-raised);
+  border: 1px solid var(--hud-cyan);
+  border-radius: 4px;
+}
+
+.task-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.task {
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--hud-line);
+}
+
+.task:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.task-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.task-goal {
+  flex: 1;
+  min-width: 220px;
+  color: var(--hud-text);
+  font-size: 13px;
+}
+
+.bar {
+  display: inline-block;
+  width: 140px;
+  height: 8px;
+  background: var(--hud-bg-head);
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #1f9fb8, var(--hud-green));
+  transition: width 0.4s ease;
+}
+
+.bar-failed .bar-fill {
+  background: var(--hud-red);
+}
+
+/* 零位图兜底：任何位图标签一律不渲染（§15.4-1，防御性） */
+img[src$=".png"], img[src$=".jpg"], img[src$=".jpeg"],
+img[src$=".webp"], img[src$=".gif"] { display: none; }

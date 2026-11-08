@@ -1,0 +1,128 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "MACS · 多 Agent 协作执行系统",
+    "locale": "zh-CN",
+    "subtitle": "Multi-Agent Cooperative System · 分布式孵化器集群 · UDP 广播调度",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main-flow",
+        "label": "任务全链路",
+        "focus": ["user", "acceptance", "tower", "gateway", "probe", "incubators", "exec-group", "merger", "review"],
+        "note": "从需求接入到终审通过的完整生命周期。"
+      },
+      {
+        "id": "broadcast-dispatch",
+        "label": "广播调度",
+        "focus": ["tower", "gateway", "probe", "incubators"],
+        "note": "调度塔一次 UDP 广播向所有孵化器下发，孵化器按负载竞争承接并回 ACK。"
+      },
+      {
+        "id": "quality-gates",
+        "label": "三层质量保障",
+        "focus": ["exec-group", "merger", "review"],
+        "note": "自检 → 合并复核 → 云端抽查。"
+      }
+    ]
+  },
+  "lanes": [
+    { "id": "user", "label": "用户与协作" },
+    { "id": "cloud", "label": "云端 · OpenClaw 调度塔" },
+    { "id": "fleet", "label": "本地 · 分布式孵化器集群" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "需求定义", "fromCol": 0, "toCol": 1 },
+    { "id": "dispatch", "label": "UDP 广播调度", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "hive", "label": "蜂巢并行执行", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["user", "acceptance", "tower"],
+  "nodes": [
+    { "id": "user", "lane": "user", "col": 0, "type": "external", "label": "需求方", "sublabel": "Human User", "width": 100 },
+    { "id": "acceptance", "lane": "user", "col": 1, "type": "frontend", "label": "验收标准设计", "sublabel": "AI 拟稿 + 人工确认", "tag": "人机混合", "width": 130 },
+
+    { "id": "tower", "lane": "cloud", "col": 1, "type": "cloud", "label": "OpenClaw 调度塔", "sublabel": "DAG 调度 · 全局负载均衡", "tag": "调度中枢", "width": 150 },
+    { "id": "review", "lane": "cloud", "col": 2, "type": "security", "label": "云端抽查核验", "sublabel": "Spot Check Engine", "tag": "终审层", "width": 130 },
+    { "id": "gateway", "lane": "cloud", "col": 3, "type": "backend", "label": "UDP 调度网关", "sublabel": "广播下发 · 单播汇聚", "tag": "调度出口", "width": 140 },
+
+    { "id": "probe", "lane": "fleet", "col": 2, "type": "messagebus", "label": "孵化器 Reporter", "sublabel": "UDP 接入 · 心跳 / 资源上报", "width": 140 },
+    { "id": "incubators", "lane": "fleet", "col": 3, "type": "backend", "label": "孵化器集群", "sublabel": "分布式 N 节点 · max_workers", "tag": "竞争承接", "width": 150 },
+    { "id": "exec-group", "lane": "fleet", "col": 4, "type": "backend", "label": "并行执行组", "sublabel": "Worker 集群 · N 并发", "tag": "子任务级并行", "width": 120 },
+    { "id": "merger", "lane": "fleet", "col": 5, "type": "backend", "label": "合并 Worker", "sublabel": "Merger · 汇总 + 复核", "tag": "单点合并", "width": 110 }
+  ],
+  "edges": [
+    { "id": "e-req", "from": "user", "to": "acceptance", "label": "提交需求", "variant": "default" },
+    { "id": "e-accept-tower", "from": "acceptance", "to": "tower", "label": "需求 + 验收标准", "variant": "emphasis" },
+
+    { "id": "e-tower-gateway", "from": "tower", "to": "gateway", "label": "DAG 计划 + 调度决策", "variant": "default" },
+    { "id": "e-review-tower", "from": "review", "to": "tower", "label": "终审结果", "variant": "security", "role": "return" },
+
+    { "id": "e-gateway-probe", "from": "gateway", "to": "probe", "label": "UDP 广播 dispatch", "variant": "emphasis" },
+    { "id": "e-probe-gateway", "from": "probe", "to": "gateway", "label": "ACK + 状态上报 (单播)", "variant": "emphasis" },
+
+    { "id": "e-probe-incubators", "from": "probe", "to": "incubators", "label": "广播承接 · 竞争孵化", "variant": "default" },
+    { "id": "e-probe-review", "from": "probe", "to": "review", "label": "报告 + 指纹", "variant": "emphasis" },
+
+    { "id": "e-incubators-exec", "from": "incubators", "to": "exec-group", "label": "按 max_workers 孵化 N Worker", "variant": "default" },
+    { "id": "e-exec-merger", "from": "exec-group", "to": "merger", "label": "子任务产物 + 自检报告", "variant": "default" },
+
+    { "id": "e-merger-probe", "from": "merger", "to": "probe", "label": "合并结果 + 审查", "variant": "default", "role": "return" }
+  ],
+  "cards": [
+    {
+      "dot": "amber",
+      "title": "MACS · 分布式蜂巢并行模型",
+      "items": [
+        "父任务拆分为多个子任务（DAG 依赖图）",
+        "多个孵化器分布式挂载到调度塔，各自上报 max_workers",
+        "无依赖的子任务跨孵化器同时孵化，并行执行",
+        "每个子任务使用对应 agent.md 模板",
+        "全部子任务完成后触发合并 Worker"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "UDP 广播调度机制",
+      "items": [
+        "下行：调度塔一次广播，所有孵化器同时收到 dispatch",
+        "上行：孵化器以 UDP 单播上报心跳 / 状态 / 资源",
+        "ACK 确认 + 重传（200ms/500ms/1s，最多 3 次）",
+        "统一信封 msg_id 去重，广播重复投递幂等",
+        "单包 ≤1200 字节，超限走 fetch_request 分块拉取"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "全局负载均衡",
+      "items": [
+        "孵化器选择评分：空闲度*0.45 + 负载*0.35 + 模板命中 + 分散惩罚",
+        "available_slots = max_workers - active_workers",
+        "过滤 unreachable / offline / 无空槽 的孵化器",
+        "每 30s 触发负载再平衡（rebalanceTick）",
+        "全局并行上限 = Σ 各孵化器 max_workers"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "三层质量保障（并行增强）",
+      "items": [
+        "第一层：各子任务 Worker 并行自检",
+        "第二层：Merger 汇总 + 并行复核子任务",
+        "第三层：云端抽查（整任务 / 抽样 / 单子任务）",
+        "可选：人工终审（按需触发）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "合并策略",
+      "items": [
+        "concat：简单拼接（文档类）",
+        "smart：智能合并（代码/配置）",
+        "structured：结构化数据合并",
+        "冲突检测 + 自动解决 + 记录留痕",
+        "合并后产出汇总交接文档"
+      ]
+    }
+  ]
+}

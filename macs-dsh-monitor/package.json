@@ -1,0 +1,35 @@
+{
+  "name": "macs-dsh-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MACS DSH 监控终端插件 — deepseek harness TUI，内容对齐 macs-tower-web 三平面（只读）",
+  "type": "module",
+  "bin": {
+    "macs-monitor": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/cli.tsx",
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src --ext .ts,.tsx",
+    "test": "vitest run",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "eventsource": "^2.0.2",
+    "ink": "^4.4.1",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "eslint": "^8.57.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

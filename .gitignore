@@ -1,0 +1,37 @@
+# ── 构建产物 ──
+/bin/
+*.exe
+*.dll
+*.test
+
+# ── 本地数据库（含 WAL / 备份）──
+*.db
+*.db-shm
+*.db-wal
+*.db.*bak
+*.db.busytest
+*.db.r1
+*.db.r2
+
+# ── 运行日志与临时文件 ──
+*.log
+*.tmp
+tmp_*
+
+# ── Node / 前端 ──
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+.vite/
+
+# ── 环境与密钥 ──
+.env
+.env.local
+*.pem
+*.key
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
