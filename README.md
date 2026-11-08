@@ -437,7 +437,25 @@ macs/
 
 ## License
 
-MIT &copy; 2026 Jarcem
+MACS 以 **GNU Affero General Public License v3.0（AGPL-3.0）** 发布，并提供商业双授权。
+
+```
+SPDX-License-Identifier: AGPL-3.0-or-later
+```
+
+| 使用方式                                            | 授权                                              |
+| --------------------------------------------------- | ------------------------------------------------- |
+| 个人学习、研究、内部评估、与开源项目集成            | ✅ AGPL-3.0 免费授权                              |
+| 商用，且愿意按 AGPL 开源你的修改（含网络服务场景）  | ✅ AGPL-3.0 免费授权                              |
+| 闭源集成、专有分发、作为托管服务提供而不开源        | 💼 需单独商业授权                                 |
+
+**AGPL 的关键义务**：修改后若通过网络向用户提供服务，必须以 AGPL 提供对应源代码。纯内部自用、不对外提供网络服务的场景，按 GPL 系列的常规边界执行即可。
+
+**商业授权**：`leo@leosindustry.com` · 完整条款见 [LICENSE](LICENSE)。
+
+**第三方依赖**：`modernc.org/sqlite`（BSD-3-Clause）、React / Vite / Ink（MIT）等组件仍适用各自许可证，不受本项目的 AGPL 覆盖；分发二进制时请保留其版权与许可声明。
+
+Copyright &copy; 2026 Jarcem
 
 <br/>
 
