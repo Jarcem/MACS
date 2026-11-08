@@ -1,0 +1,50 @@
+MACS - Multi-Agent Cooperative System
+Copyright (C) 2026 Jarcem <leo@leosindustry.com>
+
+This product is licensed under the GNU Affero General Public License v3.0 or later
+(AGPL-3.0-or-later). See LICENSE for the full text, and COMMERCIAL-LICENSE.md for
+the separate commercial licensing option.
+
+Third-party components
+----------------------
+
+MACS bundles or links the following third-party software. Each component remains
+under its own license and is NOT covered by MACS's AGPL-3.0 license. When you
+redistribute binaries or source, keep the copyright and license notices below.
+
+Go modules
+  modernc.org/sqlite
+    License: BSD-3-Clause
+    Copyright (c) 2017 The modernc.org Authors
+
+  Go standard library (net, net/http, encoding/json, database/sql, ...)
+    License: BSD-3-Clause
+    Copyright (c) 2009 The Go Authors
+
+Web console (macs-tower-web)
+  React, ReactDOM
+    License: MIT
+    Copyright (c) Meta Platforms, Inc. and affiliates
+
+  Vite, @vitejs/plugin-react
+    License: MIT
+    Copyright (c) 2019-present, Yuxi (Evan) You and Vite contributors
+
+  TypeScript
+    License: Apache-2.0
+    Copyright (c) Microsoft Corporation
+
+DSH monitor (macs-dsh-monitor)
+  Ink
+    License: MIT
+    Copyright (c) Vadim Demedes
+
+  React
+    License: MIT
+    Copyright (c) Meta Platforms, Inc. and affiliates
+
+The full license texts for the above components are distributed with their
+respective packages (e.g. under node_modules/<package>/LICENSE) and are available
+from the upstream projects.
+
+If you believe a component is missing from this list, please open an issue.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package probe 模块 #16：资源探针（M1 轻量版：runtime 指标，磁盘/GPU 随 M2 扩展）
 package probe
 

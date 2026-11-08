@@ -2,6 +2,7 @@
   "name": "macs-dsh-monitor",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "description": "MACS DSH 监控终端插件 — deepseek harness TUI，内容对齐 macs-tower-web 三平面（只读）",
   "type": "module",
   "bin": {

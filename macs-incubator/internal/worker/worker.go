@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package worker 孵化器内执行单元：接到 dispatch 后真正干活并产出结果
 // 垂直切片阶段实现 text_analysis（对目标片段做真实统计），后续替换为 agent 运行
 package worker

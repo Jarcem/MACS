@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package orchestrator 模块 #5：任务编排（M2 垂直切片）
 // 目标 → 拆解为并行子任务 → 按槽位选在线孵化器分发 → 收 execution_result → 汇总进度 → 推进后续子任务
 package orchestrator

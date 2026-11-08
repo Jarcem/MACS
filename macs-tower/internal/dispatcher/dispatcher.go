@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package dispatcher 模块 #3：广播调度服务
 // Dispatch：选在线孵化器 → 单播 dispatch → 等 ACK（3s）→ 指数退避重试 ≤3 次 → dispatch_log 落终态
 // ACK 等待通过 pending 相关表由网关路由 HandleAck 唤醒

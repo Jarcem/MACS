@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // HUD 主题 token → Ink 颜色映射（UI 设计 V1.3 §15.5）
 // Ink 不支持 alpha，dim 用 gray 近似；状态符号语义沿用 §14.7
 export const hud = {

@@ -458,9 +458,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 **Key AGPL obligation**: if you modify the software and make it available to users over a network, you must offer the corresponding source under AGPL. Purely internal use without exposing a network service follows the usual GPL-family boundary.
 
-**Commercial licensing**: `leo@leosindustry.com` · see [LICENSE](LICENSE) for the full terms.
+**Commercial licensing**: `leo@leosindustry.com` · full AGPL text in [LICENSE](LICENSE) · commercial terms and application steps in [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
 
-**Third-party components**: `modernc.org/sqlite` (BSD-3-Clause), React / Vite / Ink (MIT) and others remain under their own licenses and are not covered by this project's AGPL. Keep their copyright and license notices when distributing binaries.
+**Third-party components**: `modernc.org/sqlite` (BSD-3-Clause), React / Vite / Ink (MIT) and others remain under their own licenses and are not covered by this project's AGPL — see [NOTICE](NOTICE). Keep their copyright and license notices when distributing binaries.
 
 Copyright &copy; 2026 Jarcem
 

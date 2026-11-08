@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { api, DagNode, get } from './api.js';

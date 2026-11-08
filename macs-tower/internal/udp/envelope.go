@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package udp 是 MACS UDP 消息契约的单一事实源（主设计附录 B.1，V3.5 全集）。
 // incubator / cmdterm 复制本文件或 import 本模块，禁止各自另写类型定义。
 package udp

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // macs-cmdterm 命令终端（模块 #32，V3.4/V3.5）
 // 安全模型：仅执行调度塔 Agent 签发的 cmd_exec
 //   HMAC-SHA256 签名（ConstantTimeCompare 防时序）+ nonce/60s 时间窗防重放

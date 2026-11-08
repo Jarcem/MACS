@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package cluster 模块 #4：孵化器集群管理
 // 心跳刷新（register/report 均视为心跳）+ 60s 巡检：180s 无心跳判离线（cmdterm 同口径 §6.4.14）
 package cluster

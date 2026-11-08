@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // deepseek harness 插件入口
 // DSH 加载本插件后，可通过 harness 命令唤起 MACS 监控终端（内容同管理后台 web 端）
 export const plugin = {

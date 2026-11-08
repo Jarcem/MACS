@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // 管理后台 API 客户端（主设计附录 B.1；dev 期由 vite proxy 转发到 8471）
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { Authorization: `Bearer ${localStorage.getItem('macs_token') ?? ''}` } });

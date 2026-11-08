@@ -456,9 +456,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 **AGPL 的关键义务**：修改后若通过网络向用户提供服务，必须以 AGPL 提供对应源代码。纯内部自用、不对外提供网络服务的场景，按 GPL 系列的常规边界执行即可。
 
-**商业授权**：`leo@leosindustry.com` · 完整条款见 [LICENSE](LICENSE)。
+**商业授权**：`leo@leosindustry.com` · AGPL 全文见 [LICENSE](LICENSE) · 商业授权范围与申请流程见 [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)。
 
-**第三方依赖**：`modernc.org/sqlite`（BSD-3-Clause）、React / Vite / Ink（MIT）等组件仍适用各自许可证，不受本项目的 AGPL 覆盖；分发二进制时请保留其版权与许可声明。
+**第三方依赖**：`modernc.org/sqlite`（BSD-3-Clause）、React / Vite / Ink（MIT）等组件仍适用各自许可证，不受本项目的 AGPL 覆盖，详见 [NOTICE](NOTICE)；分发二进制时请保留其版权与许可声明。
 
 Copyright &copy; 2026 Jarcem
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // macs-tower 调度塔入口（M1：模块 #1 注册认证 + #2 UDP 网关 + #3 广播调度 + #4 集群管理）
 package main
 

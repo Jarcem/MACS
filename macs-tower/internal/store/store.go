@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package store 云端库访问层（M1：SQLite 默认，PG 经 DATABASE_URL 切换见 V3.4 决策）
 package store
 

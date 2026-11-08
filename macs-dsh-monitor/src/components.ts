@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // 终端共享组件（UI 设计 V1.4 §16.1）
 
 // ASCII 进度条：'██████░░░░' 形态，width 格宽

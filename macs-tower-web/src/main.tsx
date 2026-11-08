@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles/hud.css'; // HUD 主题（UI 设计 V1.3 §15）

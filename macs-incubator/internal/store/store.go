@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package store 孵化器本地库（模块 #17 离线缓冲载体，SQLite）
 package store
 

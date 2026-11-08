@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package gateway 模块 #2：UDP 接入网关
 // 256KB 上限（附录 B.3）+ msg_id 幂等去重（10min 窗口）+ 按 type 路由 + 统一回 ACK
 package gateway

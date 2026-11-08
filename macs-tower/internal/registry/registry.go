@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // Package registry 模块 #1：注册认证服务
 // 流程：register 上行 → 令牌校验（MACS_REGISTER_TOKEN 配置时强制）→ Q1 幂等落库 → ACK 回孵化器 id
 package registry

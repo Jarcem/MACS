@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Jarcem
+
 // macs-incubator 孵化器（M1：模块 #15 UDP 通信 + #16 资源探针 + #17 Reporter）
 // 流程：注册（带令牌）→ 收 dispatch 回 ACK → 60s 周期 report（Q2）→ 断网离线缓冲 → 恢复后补传
 package main
