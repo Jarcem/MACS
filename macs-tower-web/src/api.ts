@@ -46,6 +46,8 @@ export interface Subtask {
   task_id: string;
   seq: number;
   title: string;
+  payload: string;
+  depends_on: string;
   status: string;
   incubator_id: string;
   worker_id: string;
@@ -67,9 +69,26 @@ export interface Task {
   subtasks?: Subtask[];
 }
 
+// 外部 Agent 接入步骤（对应后端 orchestrator.PlanStep）
+export interface PlanStep {
+  mode: 'cli_agent' | 'http_agent';
+  title?: string;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  stdin?: string;
+  timeout_ms?: number;
+  url?: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  depends_on?: number[];
+}
+
 export const api = {
   incubators: () => getList<Incubator>('/api/v1/incubators'),
   dispatchLog: () => getList<DispatchRow>('/api/v1/dispatch-log'),
   tasks: () => getList<Task>('/api/v1/tasks'),
-  createTask: (goal: string) => post<Task>('/api/v1/tasks', { goal }),
+  createTask: (goal: string, plan?: PlanStep[]) =>
+    post<Task>('/api/v1/tasks', plan && plan.length > 0 ? { goal, plan } : { goal }),
 };

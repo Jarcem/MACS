@@ -130,16 +130,22 @@ func main() {
 		wj(w, map[string]any{"data": rows})
 	})
 	// ── 任务编排（M2 垂直切片）：提交目标 → 拆解 → 分发 → 汇总 ──
+	// 可选 plan：外部 Agent（cli_agent / http_agent）接入，按 depends_on 建 DAG
 	mux.HandleFunc("POST /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Goal string `json:"goal"`
+			Goal string                  `json:"goal"`
+			Plan []orchestrator.PlanStep `json:"plan"`
 		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Goal) == "" {
 			apiErr(w, 400, 66000, "goal required")
 			return
 		}
-		task, err := orch.Submit(req.Goal)
+		task, err := orch.SubmitPlan(req.Goal, req.Plan)
 		if err != nil {
+			if errors.Is(err, orchestrator.ErrBadPlan) {
+				apiErr(w, 400, 66000, err.Error())
+				return
+			}
 			apiErr(w, 500, 66500, err.Error())
 			return
 		}
@@ -173,7 +179,15 @@ func main() {
 		wj(w, map[string]any{"data": subs})
 	})
 	mux.HandleFunc("GET /api/v1/agent-platforms", func(w http.ResponseWriter, _ *http.Request) {
-		wj(w, map[string]any{"data": []any{}})
+		// 已接入的执行方式；cli_agent 的启用开关在孵化器侧（MACS_ALLOW_CLI_AGENT / MACS_AGENT_ALLOW）
+		wj(w, map[string]any{"data": []map[string]any{
+			{"id": "builtin", "name": "内置拆解", "enabled": true,
+				"note": "目标按片段并行解析 + 汇总，无需外部 Agent"},
+			{"id": "cli_agent", "name": "终端 CLI Agent", "enabled": true,
+				"note": "argv 方式启动 Zcode / DeepSeek Harness 等本机终端；孵化器需设置 MACS_ALLOW_CLI_AGENT=1 与 MACS_AGENT_ALLOW 白名单"},
+			{"id": "http_agent", "name": "HTTP Agent", "enabled": true,
+				"note": "POST/GET 到 Agent 暴露的 HTTP 接口；2xx 视为完成"},
+		}})
 	})
 	mux.HandleFunc("GET /api/v1/platform-adapters", func(w http.ResponseWriter, _ *http.Request) {
 		wj(w, map[string]any{"data": []any{}})

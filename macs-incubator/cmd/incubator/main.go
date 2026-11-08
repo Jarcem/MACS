@@ -122,17 +122,19 @@ func main() {
 		defer func() { <-sem }()
 		log.Printf("[incubator] execute start subtask=%s cap=%d", subtaskID, cap(sem))
 
-		mode, _ := taskDef["mode"].(string)
-		shard, _ := taskDef["shard"].(string)
-		text, _ := taskDef["text"].(string)
-		var deps []worker.Dep
-		if raw, ok := taskDef["deps"]; ok {
-			if b, err := json.Marshal(raw); err == nil {
-				_ = json.Unmarshal(b, &deps)
-			}
+		// taskDef 直接落到 Job：内置模式与 cli_agent/http_agent 字段共用同一份下发体
+		var job worker.Job
+		if b, err := json.Marshal(taskDef); err == nil {
+			_ = json.Unmarshal(b, &job)
 		}
-		log.Printf("[incubator] execute run subtask=%s mode=%q shard=%q len=%d deps=%d", subtaskID, mode, shard, len(text), len(deps))
-		out := worker.Run(worker.Job{Mode: mode, Shard: shard, Text: text, Deps: deps})
+		log.Printf("[incubator] execute run subtask=%s mode=%q shard=%q len=%d deps=%d", subtaskID, job.Mode, job.Shard, len(job.Text), len(job.Deps))
+		if job.Mode == "cli_agent" {
+			log.Printf("[incubator] execute cli subtask=%s command=%q args=%d cwd=%q", subtaskID, job.Command, len(job.Args), job.Cwd)
+		}
+		if job.Mode == "http_agent" {
+			log.Printf("[incubator] execute http subtask=%s method=%q url=%q", subtaskID, job.Method, job.URL)
+		}
+		out := worker.Run(job)
 		log.Printf("[incubator] execute done subtask=%s status=%s dur=%dms", subtaskID, out.Status, out.DurationMs)
 
 		payload := map[string]any{

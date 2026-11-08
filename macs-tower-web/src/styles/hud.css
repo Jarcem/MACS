@@ -231,6 +231,26 @@ html, body {
   border-color: var(--hud-cyan);
 }
 
+.task-form select {
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--hud-text);
+  background: var(--hud-bg-head);
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+  outline: none;
+}
+
+.task-form select:focus {
+  border-color: var(--hud-cyan);
+}
+
+/* 执行方式的附加参数行（CLI 命令 / HTTP 接口） */
+.task-sub {
+  margin-top: -4px;
+}
+
 .task-form input::placeholder {
   color: var(--hud-text-dim);
 }

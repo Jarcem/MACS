@@ -119,7 +119,7 @@ Ink TUI 只读终端，内容对齐 Web 看板，适合放在透明显示设备�
 </td>
 <td align="center">
 <h3>🧠 自带 Agent</h3>
-Worker 执行单元可替换：当前是真实文本分析切片，后续接 CLI / API / 协议适配器。
+执行单元可替换：内置文本分析、本机 CLI Agent（Zcode / DeepSeek Harness，argv 直启）、HTTP Agent 接口。
 </td>
 </tr>
 </table>
@@ -294,6 +294,8 @@ $env:MACS_MIGRATIONS_DIR = 'migrations'
 ..\bin\tower.exe
 
 # 3) 启动两台孵化器（单机双 Worker 垂直切片）
+# 可选：允许本机 Agent 终端接入（Zcode / DeepSeek Harness）
+# $env:MACS_ALLOW_CLI_AGENT='1'; $env:MACS_AGENT_ALLOW='zcode,dsh'
 $env:MACS_INCUBATOR_PORT='8473'; $env:MACS_INCUBATOR_NAME='worker-a'; ..\bin\incubator.exe
 $env:MACS_INCUBATOR_PORT='8474'; $env:MACS_INCUBATOR_NAME='worker-b'; ..\bin\incubator.exe
 
@@ -321,6 +323,40 @@ POST /api/v1/tasks  →  goal 按字符对半切为子任务 A / B（可并行�
 
 在 `http://localhost:5173` 上可以看到：KPI（在线孵化器 x/y、进行中、任务总数、调度记录）、任务卡片与进度条、子任务表（状态 / 执行节点 / worker / 耗时 / 结果）、集群状态与拓扑、调度记录。
 
+### 接入本机 Agent（Zcode / DeepSeek Harness）
+
+两种接入方式，Web 表单与 `POST /api/v1/tasks` 的 `plan` 字段都支持。
+
+**A. 终端 CLI（`cli_agent`）** — 孵化器侧先开闸：
+
+```powershell
+$env:MACS_ALLOW_CLI_AGENT='1'
+$env:MACS_AGENT_ALLOW='zcode,dsh'   # 可执行文件名白名单，逗号分隔
+```
+
+然后提交：
+
+```powershell
+curl -X POST http://127.0.0.1:8471/api/v1/tasks `
+  -H "Content-Type: application/json; charset=utf-8" `
+  -d '{"goal":"审查 src 目录并发安全","plan":[{"mode":"cli_agent","command":"zcode","args":["-p","{{text}}"],"cwd":"E:/proj","timeout_ms":300000}]}'
+```
+
+`command` 以 argv 直接启动、不经 shell，参数不会被拼接执行；`{{text}}` 替换为任务目标；退出码 0 = 完成，非 0 或超时 = 失败；stdout 8KB / stderr 32KB 截断回传。
+
+**B. HTTP 接口（`http_agent`）**：
+
+```powershell
+curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/json" `
+  -d '{"goal":"总结这段变更","plan":[{"mode":"http_agent","url":"http://127.0.0.1:9000/run","method":"POST","body":"{\"prompt\":\"{{text}}\"}","timeout_ms":120000}]}'
+```
+
+2xx 视为完成，其余为失败；响应体截断 8KB 回传。
+
+**多步 DAG**：`plan` 数组按顺序建子任务，`depends_on` 填前序步骤下标（0 起），前序完成后才下发；下游步骤可用 `{{deps}}` 引用前序结果摘要。Web 表单支持单步 CLI/HTTP，多步直接用 API。
+
+> 安全默认值：`cli_agent` 默认关闭，必须显式 `MACS_ALLOW_CLI_AGENT=1`；命令首 token 必须命中 `MACS_AGENT_ALLOW`，未配置则一律拒绝。HTTP 目标只允许 `http/https`。
+
 ### 配置项
 
 `macs-tower`
@@ -346,6 +382,8 @@ POST /api/v1/tasks  →  goal 按字符对半切为子任务 A / B（可并行�
 | `MACS_MAX_WORKERS`          | `4`                 | 本机并发槽                    |
 | `MACS_INCUBATOR_DB`         | `incubator.db`      | 离线缓冲 SQLite 文件          |
 | `MACS_INCUBATOR_TOKEN`      | 空                  | 注册令牌                      |
+| `MACS_ALLOW_CLI_AGENT`      | 空（关闭）          | 设为 `1` 才允许 `cli_agent`    |
+| `MACS_AGENT_ALLOW`          | 空（全拒）          | CLI 可执行文件白名单，逗号分隔 |
 
 `macs-cmdterm`
 
@@ -362,12 +400,12 @@ POST /api/v1/tasks  →  goal 按字符对半切为子任务 A / B（可并行�
 | 方法   | 路径                            | 说明                                  |
 | ------ | ------------------------------- | ------------------------------------- |
 | GET    | `/healthz`                      | 健康检查                              |
-| POST   | `/api/v1/tasks`                 | 提交目标 `{"goal": "..."}`            |
+| POST   | `/api/v1/tasks`                 | 提交目标 `{"goal":"..."}`，可选 `plan` 接本机 Agent |
 | GET    | `/api/v1/tasks`                 | 任务列表（内嵌 subtasks）             |
 | GET    | `/api/v1/tasks/{id}/subtasks`   | 指定任务的子任务                      |
 | GET    | `/api/v1/incubators`            | 孵化器在线状态                        |
 | GET    | `/api/v1/dispatch-log`          | 调度记录（ACK 状态、应答时间）        |
-| GET    | `/api/v1/agent-platforms`       | Agent 平台清单                        |
+| GET    | `/api/v1/agent-platforms`       | 已接入执行方式（builtin/cli_agent/http_agent） |
 | GET    | `/api/v1/platform-adapters`     | 平台适配器清单                        |
 | GET    | `/api/v1/telemetry/events`      | 遥测事件（最近 N 条）                 |
 | GET    | `/api/v1/telemetry/stream`      | SSE 实时事件流                        |
@@ -424,6 +462,7 @@ macs/
 
 - ✅ **M1 核心通信链路**：孵化器注册 + UDP 收发 + 单播调度 + ACK + 集群管理 + 心跳
 - ✅ **M2 单 Worker 执行（垂直切片）**：任务表 + 子任务 DAG + 目标拆解 + 真实 Worker + 结果回传 + 进度聚合 + 依赖汇总子任务 + Web 任务看板
+- ✅ **M2.5 本机 Agent 接入**：`cli_agent`（argv 直启 + 白名单 + 超时 + 输出截断）+ `http_agent`（2xx 判定 + 响应截断）+ plan DAG + Web 执行方式选择
 - ⚪ **M3 质量与归档**：复核 + 抽查 + 追溯链 + 审批 + 归档
 - ⚪ **M4 并行执行完善**：跨孵化器并行调度 + 负载均衡再平衡 + 合并 + 失败重试
 - ⚪ **M5 完善优化**：成本中心 + AI 语义拆解 + TCP 兜底通道 + 模板市场

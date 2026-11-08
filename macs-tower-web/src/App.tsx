@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Jarcem
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api, type Incubator, type DispatchRow, type Task } from './api';
+import { api, type Incubator, type DispatchRow, type PlanStep, type Task } from './api';
 
 const statusClass = (s: string) => {
   if (s === 'online' || s === 'acked' || s === 'running') return 'hud-running';
@@ -129,20 +129,59 @@ function ProgressBar({ value, status }: { value: number; status: string }) {
   );
 }
 
-// 任务编排：提交目标 → 后端拆解为两个子任务并行执行 → 汇总进度
+// 子任务 payload 里的执行方式（内置解析 / 汇总 / CLI Agent / HTTP Agent）
+const modeOf = (payload?: string) => {
+  try {
+    const m = JSON.parse(payload ?? '{}')?.mode as string | undefined;
+    if (m === 'text_analysis') return '内置';
+    if (m === 'merge') return '汇总';
+    if (m === 'cli_agent') return 'CLI';
+    if (m === 'http_agent') return 'HTTP';
+    return m ?? '';
+  } catch {
+    return '';
+  }
+};
+
+// 任务编排：提交目标 → 内置拆解，或交给本机 CLI / HTTP Agent 执行 → 汇总进度
 function TaskBoard({ tasks, err }: { tasks: Task[]; err?: string | null }) {
   const [goal, setGoal] = useState('');
+  const [mode, setMode] = useState<'builtin' | 'cli' | 'http'>('builtin');
+  const [command, setCommand] = useState('');
+  const [args, setArgs] = useState('');
+  const [cwd, setCwd] = useState('');
+  const [url, setUrl] = useState('');
+  const [method, setMethod] = useState('POST');
+  const [body, setBody] = useState('{"prompt":"{{text}}"}');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+
+  const ready = mode === 'builtin' || (mode === 'cli' ? command.trim() !== '' : url.trim() !== '');
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const g = goal.trim();
-    if (!g || busy) return;
+    if (!g || busy || !ready) return;
     setBusy(true);
     setMsg(null);
     try {
-      await api.createTask(g);
+      let plan: PlanStep[] | undefined;
+      if (mode === 'cli') {
+        plan = [{
+          mode: 'cli_agent',
+          command: command.trim(),
+          args: args.trim() ? args.trim().split(/\s+/) : [],
+          cwd: cwd.trim() || undefined,
+        }];
+      } else if (mode === 'http') {
+        plan = [{
+          mode: 'http_agent',
+          url: url.trim(),
+          method: method.trim() || 'POST',
+          body: body.trim() || undefined,
+        }];
+      }
+      await api.createTask(g, plan);
       setGoal('');
     } catch (x) {
       setMsg(String((x as Error).message ?? x));
@@ -154,14 +193,43 @@ function TaskBoard({ tasks, err }: { tasks: Task[]; err?: string | null }) {
   return (
     <>
       <form className="task-form" onSubmit={submit}>
+        <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} aria-label="执行方式">
+          <option value="builtin">内置拆解</option>
+          <option value="cli">终端 CLI Agent</option>
+          <option value="http">HTTP Agent</option>
+        </select>
         <input
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
-          placeholder="输入目标，例如：梳理 MACS 监控端的关键指标"
+          placeholder="输入目标，例如：审查 src 目录的并发安全"
           aria-label="任务目标"
         />
-        <button type="submit" disabled={busy}>{busy ? '提交中…' : '开始任务'}</button>
+        <button type="submit" disabled={busy || !ready}>{busy ? '提交中…' : '开始任务'}</button>
       </form>
+
+      {mode === 'cli' && (
+        <div className="task-form task-sub">
+          <input value={command} onChange={(e) => setCommand(e.target.value)}
+            placeholder="命令（如 zcode / dsh），须在孵化器 MACS_AGENT_ALLOW 白名单" aria-label="命令" />
+          <input value={args} onChange={(e) => setArgs(e.target.value)}
+            placeholder="参数，空格分隔；可用 {{text}}" aria-label="参数" />
+          <input value={cwd} onChange={(e) => setCwd(e.target.value)}
+            placeholder="工作目录（可选）" aria-label="工作目录" />
+        </div>
+      )}
+      {mode === 'http' && (
+        <div className="task-form task-sub">
+          <input value={url} onChange={(e) => setUrl(e.target.value)}
+            placeholder="http://127.0.0.1:9000/run" aria-label="Agent URL" />
+          <input value={method} onChange={(e) => setMethod(e.target.value)}
+            placeholder="POST" aria-label="请求方法" style={{ maxWidth: 96 }} />
+          <input value={body} onChange={(e) => setBody(e.target.value)}
+            placeholder='请求体，可用 {{text}} / {{deps}}' aria-label="请求体" />
+        </div>
+      )}
+      {mode === 'cli' && (
+        <p className="hint">CLI 模式需孵化器设置 MACS_ALLOW_CLI_AGENT=1；命令以 argv 方式直接启动，不经 shell。</p>
+      )}
       {msg && <p className="hud-failed" style={{ fontSize: 12 }}>{msg}</p>}
       {tasks.length === 0 ? (
         <p className="hint">暂无任务。提交后这里显示拆解出的子任务、执行节点与实时进度。</p>
@@ -178,6 +246,7 @@ function TaskBoard({ tasks, err }: { tasks: Task[]; err?: string | null }) {
             <thead>
               <tr>
                 <th>子任务</th>
+                <th>方式</th>
                 <th>状态</th>
                 <th>执行节点</th>
                 <th>worker</th>
@@ -189,6 +258,7 @@ function TaskBoard({ tasks, err }: { tasks: Task[]; err?: string | null }) {
               {(t.subtasks ?? []).map((s) => (
                 <tr key={s.id}>
                   <td>{s.title}</td>
+                  <td className="mono-dim">{modeOf(s.payload)}</td>
                   <td className={statusClass(s.status)}>{s.status}</td>
                   <td className="mono-dim">{s.incubator_id ? s.incubator_id.slice(0, 8) : '-'}</td>
                   <td className="mono-dim">{s.worker_id || '-'}</td>
@@ -275,7 +345,7 @@ export function App() {
         </p>
       )}
 
-      <Panel title="任务编排" note="目标 → 拆解 A/B 并行 + 汇总 → 依赖门控执行">
+      <Panel title="任务编排" note="内置拆解 / 终端 CLI Agent / HTTP Agent → 依赖门控执行">
         <TaskBoard tasks={tasks} err={tsk.err} />
       </Panel>
 

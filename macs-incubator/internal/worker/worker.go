@@ -27,6 +27,17 @@ type Job struct {
 	Shard string
 	Text  string
 	Deps  []Dep
+
+	// Agent 接入（cli_agent / http_agent）
+	Command   string            `json:"command"`
+	Args      []string          `json:"args"`
+	Cwd       string            `json:"cwd"`
+	Stdin     string            `json:"stdin"`
+	TimeoutMs int64             `json:"timeout_ms"`
+	URL       string            `json:"url"`
+	Method    string            `json:"method"`
+	Headers   map[string]string `json:"headers"`
+	Body      string            `json:"body"`
 }
 
 type Outcome struct {
@@ -52,6 +63,10 @@ func Run(j Job) Outcome {
 			out.Status = "completed"
 			out.Result = analyze(j.Shard, j.Text)
 		}
+	case "cli_agent":
+		out.Status, out.Result, out.Error = apply(runCLI(j))
+	case "http_agent":
+		out.Status, out.Result, out.Error = apply(runHTTP(j))
 	case "merge":
 		if len(j.Deps) == 0 {
 			out.Status = "failed"
@@ -74,6 +89,20 @@ func Run(j Job) Outcome {
 		out.Status = "completed"
 	}
 	return out
+}
+
+// apply 只取 agent 执行结果的状态字段，计时仍由 Run 统一填写
+func apply(o Outcome) (string, string, string) {
+	return o.Status, o.Result, o.Error
+}
+
+// mustJSON 序列化信封字段，失败时退回错误文本（不影响任务终态）
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf(`{"error":%q}`, err.Error())
+	}
+	return string(b)
 }
 
 // analyze 目标片段统计：字符数、有效字符数、去重字符数、高频字符前 3

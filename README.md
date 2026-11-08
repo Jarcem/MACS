@@ -119,7 +119,7 @@ Registration, dispatch, ACK, execution results and commands are all persisted (S
 </td>
 <td align="center">
 <h3>🧠 Bring your own agent</h3>
-The execution unit is replaceable: today a real text-analysis shard, tomorrow a CLI, an API, or a protocol adapter.
+The execution unit is replaceable: built-in text analysis, a local CLI agent (Zcode / DeepSeek Harness via argv), or an HTTP agent endpoint.
 </td>
 </tr>
 </table>
@@ -296,6 +296,8 @@ $env:MACS_MIGRATIONS_DIR = 'migrations'
 ..\bin\tower.exe
 
 # 3) Start two incubators (single-machine dual-worker vertical slice)
+# Optional: allow local agent terminals (Zcode / DeepSeek Harness)
+# $env:MACS_ALLOW_CLI_AGENT='1'; $env:MACS_AGENT_ALLOW='zcode,dsh'
 $env:MACS_INCUBATOR_PORT='8473'; $env:MACS_INCUBATOR_NAME='worker-a'; ..\bin\incubator.exe
 $env:MACS_INCUBATOR_PORT='8474'; $env:MACS_INCUBATOR_NAME='worker-b'; ..\bin\incubator.exe
 
@@ -323,6 +325,40 @@ POST /api/v1/tasks  →  goal is split by character into subtasks A / B (paralle
 
 At `http://localhost:5173` you'll see: KPIs (online incubators x/y, running, total tasks, dispatch entries), task cards with progress bars, a subtask table (status / node / worker / duration / result), cluster status and topology, and the dispatch log.
 
+### Attach local agents (Zcode / DeepSeek Harness)
+
+Two adapters, both available from the web composer and the `plan` field of `POST /api/v1/tasks`.
+
+**A. Terminal CLI (`cli_agent`)** — open the gate on the incubator first:
+
+```powershell
+$env:MACS_ALLOW_CLI_AGENT='1'
+$env:MACS_AGENT_ALLOW='zcode,dsh'   # executable allowlist, comma-separated
+```
+
+Then submit:
+
+```powershell
+curl -X POST http://127.0.0.1:8471/api/v1/tasks `
+  -H "Content-Type: application/json; charset=utf-8" `
+  -d '{"goal":"Review concurrency safety in src","plan":[{"mode":"cli_agent","command":"zcode","args":["-p","{{text}}"],"cwd":"E:/proj","timeout_ms":300000}]}'
+```
+
+`command` is launched as argv with no shell, so arguments are never re-interpreted; `{{text}}` expands to the goal; exit code 0 = completed, non-zero or timeout = failed; stdout is capped at 8KB and stderr at 32KB.
+
+**B. HTTP endpoint (`http_agent`)**:
+
+```powershell
+curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/json" `
+  -d '{"goal":"Summarize this change","plan":[{"mode":"http_agent","url":"http://127.0.0.1:9000/run","method":"POST","body":"{\"prompt\":\"{{text}}\"}","timeout_ms":120000}]}'
+```
+
+2xx means completed, anything else failed; the response body is capped at 8KB.
+
+**Multi-step DAG**: the `plan` array becomes subtasks in order; `depends_on` holds indices of earlier steps (0-based) and gates dispatch until they finish. Downstream steps can reference prior output with `{{deps}}`. The web composer covers single-step CLI/HTTP; use the API for multi-step plans.
+
+> Safe defaults: `cli_agent` is off unless `MACS_ALLOW_CLI_AGENT=1`; the first token of the command must be in `MACS_AGENT_ALLOW`, otherwise everything is rejected. `http_agent` only accepts `http/https` targets.
+
 ### Configuration
 
 `macs-tower`
@@ -348,6 +384,8 @@ At `http://localhost:5173` you'll see: KPIs (online incubators x/y, running, tot
 | `MACS_MAX_WORKERS`      | `4`                 | Local concurrency slots                |
 | `MACS_INCUBATOR_DB`     | `incubator.db`      | Offline-buffer SQLite file             |
 | `MACS_INCUBATOR_TOKEN`  | empty               | Registration token                     |
+| `MACS_ALLOW_CLI_AGENT`  | empty (off)         | Set to `1` to enable `cli_agent`        |
+| `MACS_AGENT_ALLOW`      | empty (deny all)    | CLI executable allowlist, comma-separated |
 
 `macs-cmdterm`
 
@@ -364,12 +402,12 @@ At `http://localhost:5173` you'll see: KPIs (online incubators x/y, running, tot
 | Method | Path                            | Description                                |
 | ------ | ------------------------------- | ------------------------------------------ |
 | GET    | `/healthz`                      | Health check                               |
-| POST   | `/api/v1/tasks`                 | Submit a goal `{"goal": "..."}`            |
+| POST   | `/api/v1/tasks`                 | Submit a goal `{"goal":"..."}`, optional `plan` for local agents |
 | GET    | `/api/v1/tasks`                 | Task list (subtasks embedded)              |
 | GET    | `/api/v1/tasks/{id}/subtasks`   | Subtasks of a specific task                |
 | GET    | `/api/v1/incubators`            | Incubator online state                     |
 | GET    | `/api/v1/dispatch-log`          | Dispatch log (ACK status, response time)   |
-| GET    | `/api/v1/agent-platforms`       | Agent platform catalog                     |
+| GET    | `/api/v1/agent-platforms`       | Attached executors (builtin/cli_agent/http_agent) |
 | GET    | `/api/v1/platform-adapters`     | Platform adapter catalog                   |
 | GET    | `/api/v1/telemetry/events`      | Recent telemetry events                    |
 | GET    | `/api/v1/telemetry/stream`      | SSE real-time event stream                 |
@@ -426,6 +464,7 @@ macs/
 
 - ✅ **M1 Core communication link**: incubator registration + UDP send/receive + unicast dispatch + ACK + cluster manager + heartbeat
 - ✅ **M2 Single-worker execution (vertical slice)**: task table + subtask DAG + goal decomposition + real worker + result upload + progress aggregation + dependency-gated merge subtask + web task board
+- ✅ **M2.5 Local agent adapters**: `cli_agent` (argv launch + allowlist + timeout + output truncation) + `http_agent` (2xx verdict + response truncation) + plan DAG + web executor picker
 - ⚪ **M3 Quality and archiving**: review + spot checks + traceability chain + approvals + archiving
 - ⚪ **M4 Parallel execution hardening**: cross-incubator parallel scheduling + load rebalancing + merging + failure retries
 - ⚪ **M5 Polish**: cost center + AI semantic decomposition + TCP fallback channel + template marketplace
