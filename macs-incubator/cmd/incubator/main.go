@@ -125,8 +125,14 @@ func main() {
 		mode, _ := taskDef["mode"].(string)
 		shard, _ := taskDef["shard"].(string)
 		text, _ := taskDef["text"].(string)
-		log.Printf("[incubator] execute run subtask=%s mode=%q shard=%q len=%d", subtaskID, mode, shard, len(text))
-		out := worker.Run(worker.Job{Mode: mode, Shard: shard, Text: text})
+		var deps []worker.Dep
+		if raw, ok := taskDef["deps"]; ok {
+			if b, err := json.Marshal(raw); err == nil {
+				_ = json.Unmarshal(b, &deps)
+			}
+		}
+		log.Printf("[incubator] execute run subtask=%s mode=%q shard=%q len=%d deps=%d", subtaskID, mode, shard, len(text), len(deps))
+		out := worker.Run(worker.Job{Mode: mode, Shard: shard, Text: text, Deps: deps})
 		log.Printf("[incubator] execute done subtask=%s status=%s dur=%dms", subtaskID, out.Status, out.DurationMs)
 
 		payload := map[string]any{

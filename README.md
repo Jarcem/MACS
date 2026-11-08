@@ -425,7 +425,7 @@ macs/
 ## Roadmap
 
 - ✅ **M1 Core communication link**: incubator registration + UDP send/receive + unicast dispatch + ACK + cluster manager + heartbeat
-- ✅ **M2 Single-worker execution (vertical slice)**: task table + subtask DAG + goal decomposition + real worker + result upload + progress aggregation + web task board
+- ✅ **M2 Single-worker execution (vertical slice)**: task table + subtask DAG + goal decomposition + real worker + result upload + progress aggregation + dependency-gated merge subtask + web task board
 - ⚪ **M3 Quality and archiving**: review + spot checks + traceability chain + approvals + archiving
 - ⚪ **M4 Parallel execution hardening**: cross-incubator parallel scheduling + load rebalancing + merging + failure retries
 - ⚪ **M5 Polish**: cost center + AI semantic decomposition + TCP fallback channel + template marketplace

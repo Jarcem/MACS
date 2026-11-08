@@ -9,14 +9,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 	"unicode"
 )
+
+// Dep 依赖子任务的执行结果（由塔在分发 merge 子任务时注入）
+type Dep struct {
+	SubtaskID string `json:"subtask_id"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	Result    string `json:"result"`
+}
 
 type Job struct {
 	Mode  string
 	Shard string
 	Text  string
+	Deps  []Dep
 }
 
 type Outcome struct {
@@ -41,6 +51,17 @@ func Run(j Job) Outcome {
 		} else {
 			out.Status = "completed"
 			out.Result = analyze(j.Shard, j.Text)
+		}
+	case "merge":
+		if len(j.Deps) == 0 {
+			out.Status = "failed"
+			out.Error = "no dependency results"
+		} else if merged, err := merge(j.Deps); err != nil {
+			out.Status = "failed"
+			out.Error = err.Error()
+		} else {
+			out.Status = "completed"
+			out.Result = merged
 		}
 	default:
 		out.Status = "failed"
@@ -97,4 +118,71 @@ func analyze(shard, text string) string {
 		"top_chars": top,
 	})
 	return string(b)
+}
+
+// merge 汇总依赖分片结果：累加字符/有效字符/去重数，合并高频字符并重新排序
+func merge(deps []Dep) (string, error) {
+	type topChar struct {
+		Char string `json:"char"`
+		N    int    `json:"n"`
+	}
+	type shardStats struct {
+		Shard    string    `json:"shard"`
+		Chars    int       `json:"chars"`
+		NonSpace int       `json:"non_space"`
+		Unique   int       `json:"unique"`
+		TopChars []topChar `json:"top_chars"`
+	}
+
+	shards := make([]shardStats, 0, len(deps))
+	freq := map[string]int{}
+	totalChars, totalNonSpace, uniqueSum := 0, 0, 0
+	skipped := make([]string, 0)
+	for _, d := range deps {
+		if d.Status != "" && d.Status != "completed" {
+			skipped = append(skipped, d.SubtaskID)
+			continue
+		}
+		var s shardStats
+		if err := json.Unmarshal([]byte(d.Result), &s); err != nil {
+			skipped = append(skipped, d.SubtaskID)
+			continue
+		}
+		shards = append(shards, s)
+		totalChars += s.Chars
+		totalNonSpace += s.NonSpace
+		uniqueSum += s.Unique
+		for _, t := range s.TopChars {
+			freq[t.Char] += t.N
+		}
+	}
+	if len(skipped) > 0 {
+		return "", fmt.Errorf("dependency not completed: %s", strings.Join(skipped, ","))
+	}
+
+	pairs := make([]topChar, 0, len(freq))
+	for k, v := range freq {
+		pairs = append(pairs, topChar{Char: k, N: v})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].N == pairs[j].N {
+			return pairs[i].Char < pairs[j].Char
+		}
+		return pairs[i].N > pairs[j].N
+	})
+	top := pairs
+	if len(top) > 3 {
+		top = top[:3]
+	}
+
+	b, _ := json.Marshal(map[string]any{
+		"merged":          true,
+		"shard_count":     len(shards),
+		"total_chars":     totalChars,
+		"total_non_space": totalNonSpace,
+		"unique_sum":      uniqueSum,
+		"top_chars":       top,
+		"shards":          shards,
+	})
+	return string(b), nil
 }

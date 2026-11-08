@@ -157,11 +157,7 @@ func (o *Orchestrator) dispatch(target *store.Incubator, s store.Subtask) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var taskDef map[string]any
-	if err := json.Unmarshal([]byte(s.Payload), &taskDef); err != nil || taskDef == nil {
-		taskDef = map[string]any{"mode": "noop"}
-	}
-	if _, err := o.disp.DispatchTo(ctx, target, s.ID, taskDef); err != nil {
+	if _, err := o.disp.DispatchTo(ctx, target, s.ID, o.taskDef(s)); err != nil {
 		log.Printf("[orch] dispatch failed subtask=%s: %v", s.ID, err)
 		_ = o.st.FinishSubtask(s.ID, "failed", "", "dispatch: "+err.Error(), "", "")
 		if task, e := o.st.RecomputeTask(s.TaskID); e == nil {
@@ -171,6 +167,33 @@ func (o *Orchestrator) dispatch(target *store.Incubator, s store.Subtask) {
 		}
 		o.Notify()
 	}
+}
+
+// taskDef 由子任务 payload 构造下发体；merge 子任务在分发时注入依赖子任务的结果
+func (o *Orchestrator) taskDef(s store.Subtask) map[string]any {
+	var def map[string]any
+	if err := json.Unmarshal([]byte(s.Payload), &def); err != nil || def == nil {
+		return map[string]any{"mode": "noop"}
+	}
+	if def["mode"] != "merge" {
+		return def
+	}
+	deps := make([]map[string]any, 0, 2)
+	for _, id := range strings.Split(s.DependsOn, ",") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		d, err := o.st.GetSubtask(id)
+		if err != nil {
+			continue
+		}
+		deps = append(deps, map[string]any{
+			"subtask_id": d.ID, "title": d.Title, "status": d.Status, "result": d.Result,
+		})
+	}
+	def["deps"] = deps
+	return def
 }
 
 // pick 选当前空槽最多的在线孵化器
@@ -203,33 +226,38 @@ func depsCompleted(s store.Subtask, byID map[string]store.Subtask) bool {
 	return true
 }
 
-// decompose 最小拆解：目标按字符对半切，产出两个可并行的解析子任务（接入 LLM 拆解后替换）
+// decompose 最小拆解：目标按字符对半切 → 两个并行解析子任务 → 一个依赖前两者的汇总子任务
+// （接入 LLM 语义拆解后替换此处，DAG 结构与调度逻辑不变）
 func decompose(taskID, goal string) []store.Subtask {
 	runes := []rune(goal)
 	mid := len(runes) / 2
 	if mid == 0 {
 		mid = len(runes)
 	}
-	parts := []struct {
-		shard string
-		text  string
-	}{
-		{"A", string(runes[:mid])},
-		{"B", string(runes[mid:])},
-	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	out := make([]store.Subtask, 0, len(parts))
-	for i, p := range parts {
-		payload, _ := json.Marshal(map[string]any{
-			"mode": "text_analysis", "shard": p.shard, "text": p.text,
-		})
-		out = append(out, store.Subtask{
-			ID: store.NewID(), TaskID: taskID, Seq: i + 1,
-			Title:   fmt.Sprintf("子任务 %s · 目标片段解析", p.shard),
-			Payload: string(payload), DependsOn: "", Status: "pending",
+	aID, bID, cID := store.NewID(), store.NewID(), store.NewID()
+	payloadA, _ := json.Marshal(map[string]any{
+		"mode": "text_analysis", "shard": "A", "text": string(runes[:mid]),
+	})
+	payloadB, _ := json.Marshal(map[string]any{
+		"mode": "text_analysis", "shard": "B", "text": string(runes[mid:]),
+	})
+	payloadC, _ := json.Marshal(map[string]any{"mode": "merge"})
+
+	return []store.Subtask{
+		{
+			ID: aID, TaskID: taskID, Seq: 1, Title: "子任务 A · 目标片段解析",
+			Payload: string(payloadA), Status: "pending", CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: bID, TaskID: taskID, Seq: 2, Title: "子任务 B · 目标片段解析",
+			Payload: string(payloadB), Status: "pending", CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: cID, TaskID: taskID, Seq: 3, Title: "子任务 C · 分段结果汇总",
+			Payload: string(payloadC), DependsOn: aID + "," + bID, Status: "pending",
 			CreatedAt: now, UpdatedAt: now,
-		})
+		},
 	}
-	return out
 }
