@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Jarcem
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type Incubator, type DispatchRow, type Task } from './api';
 
 const statusClass = (s: string) => {
@@ -28,20 +28,81 @@ const fmtSpan = (s?: string, e?: string) => {
   return Number.isNaN(ms) || ms < 0 ? '-' : `${ms} ms`;
 };
 
+// 实时事件帧（塔 events.Hub 广播：{event, ts, data}）
+export interface StreamEvent {
+  event: string;
+  ts: string;
+  data: Record<string, any>;
+}
+
+const TASK_EVENTS = ['task_created', 'subtask_dispatched', 'subtask_finished', 'task_finished'];
+
 function usePoll<T>(fn: () => Promise<T>, ms = 5000) {
   const [data, setData] = useState<T | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    fn()
+      .then((d) => { setData(d); setErr(null); })
+      .catch((e) => setErr(String((e as Error).message ?? e)));
+  }, [fn]);
+
   useEffect(() => {
-    let alive = true;
-    const tick = () => fn()
-      .then((d) => alive && (setData(d), setErr(null)))
-      .catch((e) => alive && setErr(String(e.message ?? e)));
-    tick();
-    const t = setInterval(tick, ms);
-    return () => { alive = false; clearInterval(t); };
-  }, [fn, ms]);
-  return { data, err };
+    refresh();
+    const t = setInterval(refresh, ms);
+    return () => clearInterval(t);
+  }, [refresh, ms]);
+
+  return { data, err, refresh };
 }
+
+// SSE 订阅 /api/v1/telemetry/stream：断线 3s 自动重连，作为轮询之外的实时通道
+function useEventStream(onEvent: (e: StreamEvent) => void) {
+  const [live, setLive] = useState(false);
+  const cb = useRef(onEvent);
+  cb.current = onEvent;
+
+  useEffect(() => {
+    let es: EventSource | null = null;
+    let retry: number | undefined;
+    let closed = false;
+
+    const connect = () => {
+      es = new EventSource('/api/v1/telemetry/stream');
+      es.onopen = () => setLive(true);
+      es.onmessage = (m) => {
+        try { cb.current(JSON.parse(m.data) as StreamEvent); } catch { /* 忽略非 JSON 帧 */ }
+      };
+      es.onerror = () => {
+        setLive(false);
+        es?.close();
+        if (!closed) retry = window.setTimeout(connect, 3000);
+      };
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      es?.close();
+      if (retry) window.clearTimeout(retry);
+    };
+  }, []);
+
+  return live;
+}
+
+// SSE 事件摘要（截断 id，展示进度与状态）
+const fmtEvent = (e: StreamEvent) => {
+  const d = e.data ?? {};
+  const status = d.status ?? d.task_status ?? d.subtask?.status;
+  return [
+    d.task_id && `task ${String(d.task_id).slice(0, 8)}`,
+    d.subtask_id && `subtask ${String(d.subtask_id).slice(0, 8)}`,
+    d.incubator_id && `node ${String(d.incubator_id).slice(0, 8)}`,
+    typeof d.progress === 'number' && `${d.progress}%`,
+    status && `status ${status}`,
+  ].filter(Boolean).join(' · ') || '-';
+};
 
 function Panel({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
@@ -147,11 +208,25 @@ function TaskBoard({ tasks, err }: { tasks: Task[]; err?: string | null }) {
   );
 }
 
+// 事件去重键：重连时塔会回放历史帧，避免重复行
+const keyOf = (e: StreamEvent) => `${e.ts}|${e.event}|${e.data?.subtask_id ?? e.data?.id ?? ''}`;
+
 // 单页布局：任务编排 + 集群状态 + 拓扑 + 调度记录，一次看全，不再分页签
 export function App() {
-  const inc = usePoll(api.incubators);
-  const dsp = usePoll(api.dispatchLog);
-  const tsk = usePoll(api.tasks, 2000);
+  const inc = usePoll(api.incubators, 10000);
+  const dsp = usePoll(api.dispatchLog, 10000);
+  const tsk = usePoll(api.tasks, 5000);
+  const [events, setEvents] = useState<StreamEvent[]>([]);
+  const [lastAt, setLastAt] = useState('-');
+
+  const live = useEventStream((ev) => {
+    setLastAt(fmtTime(ev.ts));
+    setEvents((prev) => [ev, ...prev.filter((x) => keyOf(x) !== keyOf(ev))].slice(0, 8));
+    if (TASK_EVENTS.includes(ev.event)) {
+      tsk.refresh();
+      dsp.refresh();
+    }
+  });
 
   const incubators: Incubator[] = inc.data ?? [];
   const dispatch: DispatchRow[] = dsp.data ?? [];
@@ -164,7 +239,13 @@ export function App() {
       <header className="page-head">
         <div>
           <h1 className="page-title">MACS 控制塔</h1>
-          <p className="page-sub">运维 / 监控 / 交互 · 单机双 worker 垂直切片 · 2s 自动刷新</p>
+          <p className="page-sub">
+            运维 / 监控 / 交互 · 单机双 worker 垂直切片 ·
+            <span className={live ? 'hud-running' : 'hud-checking'}>
+              {live ? ' SSE 实时' : ' SSE 重连中'}
+            </span>
+            <span className="mono-dim"> · 最近事件 {lastAt}</span>
+          </p>
         </div>
         <div className="kpis">
           <div className="kpi">
@@ -194,8 +275,33 @@ export function App() {
         </p>
       )}
 
-      <Panel title="任务编排" note="目标 → 拆解 2 个子任务 → 并行执行 → 汇总">
+      <Panel title="任务编排" note="目标 → 拆解 A/B 并行 + 汇总 → 依赖门控执行">
         <TaskBoard tasks={tasks} err={tsk.err} />
+      </Panel>
+
+      <Panel title="实时事件" note={live ? 'SSE 已连接 · 事件驱动刷新' : 'SSE 重连中 · 轮询兜底'}>
+        {events.length === 0 ? (
+          <p className="hint">等待事件。提交任务后会实时出现「任务创建 / 子任务下发 / 子任务完成 / 任务完成」。</p>
+        ) : (
+          <table className="hud-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>事件</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((e, i) => (
+                <tr key={`${e.ts}-${i}`}>
+                  <td className="mono-dim">{fmtTime(e.ts)}</td>
+                  <td className="hud-running">{e.event}</td>
+                  <td className="mono-dim">{fmtEvent(e)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </Panel>
 
       <Panel title="集群状态" note={`${incubators.length} 台`}>

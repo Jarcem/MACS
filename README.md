@@ -101,7 +101,7 @@ Failed uploads land in local SQLite first; the Reporter re-sends them periodical
 </td>
 <td align="center">
 <h3>🖥️ Dark HUD</h3>
-Single-page monitoring: KPIs, task composer, cluster state, topology, dispatch log; SSE events plus 2s polling.
+Single-page monitoring: KPIs, task composer, cluster state, topology, dispatch log; SSE-driven refresh with history replay, plus polling fallback.
 </td>
 <td align="center">
 <h3>⌨️ Terminal monitor</h3>

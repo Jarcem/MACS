@@ -10,9 +10,13 @@ import (
 	"time"
 )
 
+// 最近事件保留条数：新订阅者（含页面刷新）先收到历史帧，再进入实时流
+const recentMax = 100
+
 type Hub struct {
-	mu   sync.Mutex
-	subs map[chan []byte]struct{}
+	mu     sync.Mutex
+	subs   map[chan []byte]struct{}
+	recent [][]byte
 }
 
 func New() *Hub { return &Hub{subs: map[chan []byte]struct{}{}} }
@@ -29,6 +33,10 @@ func (h *Hub) Publish(event string, data any) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.recent = append(h.recent, b)
+	if len(h.recent) > recentMax {
+		h.recent = h.recent[len(h.recent)-recentMax:]
+	}
 	for ch := range h.subs {
 		select {
 		case ch <- b:
@@ -37,10 +45,25 @@ func (h *Hub) Publish(event string, data any) {
 	}
 }
 
-// Subscribe 返回事件通道与取消函数
+// Recent 返回最近事件帧（时间正序），供 REST 快照端点使用
+func (h *Hub) Recent() [][]byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([][]byte, len(h.recent))
+	copy(out, h.recent)
+	return out
+}
+
+// Subscribe 返回事件通道与取消函数；通道中先预置最近的历史帧
 func (h *Hub) Subscribe() (<-chan []byte, func()) {
 	ch := make(chan []byte, 64)
 	h.mu.Lock()
+	for _, b := range h.recent {
+		select {
+		case ch <- b:
+		default:
+		}
+	}
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 	return ch, func() {

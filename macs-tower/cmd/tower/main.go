@@ -179,7 +179,12 @@ func main() {
 		wj(w, map[string]any{"data": []any{}})
 	})
 	mux.HandleFunc("GET /api/v1/telemetry/events", func(w http.ResponseWriter, _ *http.Request) {
-		wj(w, map[string]any{"data": []any{}})
+		frames := hub.Recent()
+		data := make([]json.RawMessage, 0, len(frames))
+		for _, b := range frames {
+			data = append(data, json.RawMessage(b))
+		}
+		wj(w, map[string]any{"data": data})
 	})
 	// SSE 实时事件（V3.0 §6.4.13）：任务/子任务状态变化实时推送 + 30s 心跳帧
 	mux.HandleFunc("GET /api/v1/telemetry/stream", func(w http.ResponseWriter, r *http.Request) {

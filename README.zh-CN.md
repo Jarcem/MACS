@@ -101,7 +101,7 @@ Worker 按需孵化、用完即毁。并发受本机 <code>max_workers</code> �
 </td>
 <td align="center">
 <h3>🖥️ 深色 HUD</h3>
-单页监控：KPI、任务编排、集群状态、拓扑、调度记录；SSE 事件流 + 2s 轮询。
+单页监控：KPI、任务编排、集群状态、拓扑、调度记录；SSE 事件驱动刷新（含历史回放）+ 轮询兜底。
 </td>
 <td align="center">
 <h3>⌨️ 终端监控</h3>
