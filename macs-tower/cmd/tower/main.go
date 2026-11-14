@@ -916,6 +916,56 @@ func main() {
 		wj(w, map[string]any{"ok": true, "incubator_id": incubatorID})
 	}))
 
+	// ── UI 设计 §7.3 配置开关面板：当前值/默认值/开↔关语义/拦截边界（不允许黑盒开关）──
+	mux.HandleFunc("GET /api/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		type switchRow struct {
+			Key       string `json:"key"`
+			Current   any    `json:"current"`
+			Default   any    `json:"default"`
+			OnEffect  string `json:"on_effect"`
+			OffEffect string `json:"off_effect"`
+			Boundary  string `json:"boundary"`
+			Source    string `json:"source"`
+		}
+		rows := []switchRow{
+			{"feature.review.enabled", qualCfg.ReviewEnabled, true, "复核 Worker 孵化", "仅自检+抽查", "只影响复核孵化", "MACS_FEATURE_REVIEW"},
+			{"feature.spot_check.enabled", qualCfg.SpotCheckEnabled, false, "云端抽查（E06 对账）", "仅自检+复核", "只拦截抽查触发", "MACS_FEATURE_SPOT_CHECK"},
+			{"spot_check.ratio", qualCfg.SpotCheckRatio, 20, "抽样比例 %", "-", "Q7 口径", "MACS_SPOT_CHECK_RATIO"},
+			{"udp.broadcast_mode.enabled", cfg.BroadcastEnabled, true, "广播 first-ACK-wins", "点名单播", "只影响新调度", "MACS_BROADCAST_ENABLED"},
+			{"cluster.rebalance.enabled", cfg.RebalanceEnabled, true, "30s 再平衡（0.85 高水位）", "静态分配", "不迁移在跑子任务", "MACS_REBALANCE_ENABLED"},
+			{"worker.ttl", int(cfg.SubtaskTTL.Minutes()), 30, "超时销毁 + E01 重试", "-", "Q3 口径", "MACS_SUBTASK_TTL_MIN"},
+			{"worker.max_retries", cfg.MaxRetries, 3, "E01 重试上限", "-", "指数退避 30s×2^n", "MACS_MAX_RETRIES"},
+			{"budget.limit_enforce", true, true, "多级预算 + 塔侧上界强制（E09）", "只记账告警", "不影响在跑收尾", "常开（M5）"},
+			{"reliability.circuit_breaker", true, true, "连续 5 次失败熔断 60s", "-", "guardrail_events 落账", "常开（V3.5.4）"},
+			{"done_acceptance_mode", "strict", "strict", "自检严格门", "advisory 带缺陷提交", "只作用于自检提交边界", "常开（M3）"},
+			{"feature.preemptive.enabled", false, false, "高优抢占槽位", "严格 FIFO", "10.3 预留", "未实现（对照表 📋）"},
+			{"udp.tcp_fallback.enabled", false, false, "TCP 兜底通道", "仅 UDP+ACK", "10.3 预留", "未实现（对照表 📋）"},
+			{"plugins.enabled", false, false, "第三方插件加载", "仅内置适配器", "6.4.12 预留", "未实现（对照表 📋）"},
+		}
+		wj(w, map[string]any{"data": rows})
+	})
+
+	// ── UI 设计 §8.2 枚举字典：Badge 从后端枚举读取，状态着色零散硬编码收敛到此处 ──
+	mux.HandleFunc("GET /api/v1/enums", func(w http.ResponseWriter, _ *http.Request) {
+		colorOf := map[string]string{ // 8.2 五档语义
+			"online": "success", "acked": "success", "completed": "success", "passed": "success", "approved": "success", "ready": "success", "spot_check_passed": "success",
+			"running": "active", "reviewing": "active", "in_spot_check": "active",
+			"pending": "neutral", "registered": "neutral", "skipped": "neutral",
+			"dispatched": "waiting", "review_pending": "waiting", "self_checking": "waiting",
+			"overloaded": "warn", "retransmitted": "warn", "partial_failure": "warn", "timeout": "warn",
+			"offline": "danger", "failed": "danger", "rejected": "danger", "blocked": "danger", "frozen": "danger", "revoked": "danger", "unreachable": "danger",
+		}
+		wj(w, map[string]any{
+			"task_status":       []string{"pending", "running", "in_spot_check", "completed", "partial_failure", "blocked", "failed", "cancelled"},
+			"subtask_status":    []string{"pending", "ready", "dispatched", "running", "self_checking", "review_pending", "reviewing", "frozen", "completed", "failed", "skipped", "cancelled"},
+			"incubator_status":  []string{"online", "overloaded", "offline", "unreachable"},
+			"approval_status":   []string{"pending", "approved", "rejected", "expired"},
+			"spot_check_status": []string{"pending", "running", "passed", "failed", "retried", "skipped"},
+			"dispatch_status":   []string{"pending", "sent", "retransmitted", "acked", "driver_mismatch", "failed", "duplicate"},
+			"color":             colorOf,
+		})
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		apiErr(w, http.StatusNotFound, 66200, "resource not found")
 	})

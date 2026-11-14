@@ -5,13 +5,22 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type Incubator, type DispatchRow, type PlanStep, type Task, type Approval, type SpotCheck, type ArchiveDoc, type CostSummary, type AgentPlatform, type CommandTerminal } from './api';
 
 // 状态色语义（UI 设计 8.2：绿=成功 / 蓝=进行中 / 灰=中性 / 琥珀=警告 / 红=失败）
+// 状态色语义（UI 设计 8.2）：枚举字典驱动（GET /api/v1/enums 的 color 档），
+// 字典未加载时回退内置映射——同一状态全端同色
+const FALLBACK_COLOR: Record<string, string[]> = {
+  success: ['online', 'acked', 'completed', 'passed', 'approved', 'ready', 'spot_check_passed'],
+  active: ['running', 'reviewing', 'in_spot_check'],
+  neutral: ['pending', 'registered', 'skipped'],
+  waiting: ['dispatched', 'review_pending', 'self_checking'],
+  warn: ['overloaded', 'retransmitted', 'partial_failure', 'timeout'],
+  danger: ['offline', 'failed', 'rejected', 'blocked', 'frozen', 'revoked', 'unreachable'],
+};
+let ENUM_COLOR: Record<string, string> | null = null;
+fetch('/api/v1/enums').then((r) => r.json()).then((d) => { ENUM_COLOR = d.color ?? null; }).catch(() => { /* 回退内置 */ });
+
 const statusClass = (s: string) => {
-  if (['online', 'acked', 'running', 'reviewing', 'in_spot_check'].includes(s)) return 'hud-running';
-  if (['completed', 'passed', 'approved', 'ready', 'spot_check_passed'].includes(s)) return 'hud-completed';
-  if (['dispatched', 'review_pending', 'self_checking', 'registered'].includes(s)) return 'hud-checking';
-  if (['overloaded', 'retransmitted', 'partial_failure', 'timeout'].includes(s)) return 'hud-warn';
-  if (['offline', 'failed', 'rejected', 'blocked', 'frozen', 'revoked', 'unreachable'].includes(s)) return 'hud-failed';
-  return 'hud-pending';
+  const color = ENUM_COLOR?.[s] ?? (Object.entries(FALLBACK_COLOR).find(([, list]) => list.includes(s))?.[0] ?? 'neutral');
+  return ({ success: 'hud-completed', active: 'hud-running', waiting: 'hud-checking', warn: 'hud-warn', danger: 'hud-failed' } as Record<string, string>)[color] ?? 'hud-pending';
 };
 
 // 后端时间为 ISO8601（UTC），展示为本地时间 MM-DD HH:mm:ss
@@ -148,6 +157,7 @@ const modeOf = (payload?: string, kind?: string) => {
 
 // 任务编排：提交目标 → 内置拆解 / Agent 执行 → 质量管线 → 归档
 function TaskBoard({ tasks, err, onChanged }: { tasks: Task[]; err?: string | null; onChanged: () => void }) {
+  const [openDetail, setOpenDetail] = useState('');
   const [goal, setGoal] = useState('');
   const [mode, setMode] = useState<'builtin' | 'cli' | 'http' | 'llm'>('builtin');
   const [command, setCommand] = useState('');
@@ -276,6 +286,9 @@ function TaskBoard({ tasks, err, onChanged }: { tasks: Task[]; err?: string | nu
                 取消
               </button>
             )}
+            <button className="hud-btn" onClick={() => setOpenDetail(openDetail === t.id ? '' : t.id)}>
+              {openDetail === t.id ? '收起详情' : '四段详情'}
+            </button>
           </div>
           <table className="hud-table">
             <thead>
@@ -312,8 +325,140 @@ function TaskBoard({ tasks, err, onChanged }: { tasks: Task[]; err?: string | nu
           </table>
         </div>
       ))}
+      {tasks.filter((t) => t.id === openDetail).map((t) => (
+        <TaskDetail key={t.id} id={t.id} onClose={() => setOpenDetail('')} />
+      ))}
       {err && <p className="hud-failed" style={{ fontSize: 12 }}>任务接口异常：{err}</p>}
     </>
+  );
+}
+
+// ── 任务详情四段式（UI §5.3 /tasks/:id，单页抽屉形态）──
+function TaskDetail({ id, onClose }: { id: string; onClose: () => void }) {
+  const [tab, setTab] = useState<'dag' | 'lanes' | 'timeline' | 'artifacts'>('dag');
+  const detail = usePoll(() => api.taskDetail(id), 5000);
+  const dag = usePoll(() => api.taskDag(id), 5000);
+  const docs = usePoll(() => api.documents(id), 8000);
+
+  const subs = dag.data?.data?.subtasks ?? [];
+  const deps = dag.data?.data?.dependencies ?? [];
+  const byId = Object.fromEntries(subs.map((x) => [x.id, x]));
+  const traces = detail.data?.data?.traces ?? [];
+
+  // ② 泳道看板：按孵化器分组（蜂巢并行度）
+  const lanes: Record<string, typeof subs> = {};
+  for (const x of subs) {
+    const node = x.incubator_id || '未分配';
+    (lanes[node] ??= []).push(x);
+  }
+
+  return (
+    <div className="task-detail">
+      <div className="task-detail-head">
+        <span className="task-goal">任务详情 {id.slice(0, 8)}</span>
+        <span className="mono-dim">成本 {detail.data?.data?.cost_cents ?? 0} 分 · 追溯链 {traces.length} 节点</span>
+        <button className="hud-btn" onClick={onClose}>收起</button>
+      </div>
+      <div className="task-detail-tabs">
+        {([['dag', '① DAG 拓扑'], ['lanes', '② 孵化器泳道'], ['timeline', '③ 质量时间线'], ['artifacts', '④ 产物与归档']] as const).map(([k, label]) => (
+          <button key={k} className={`hud-btn${tab === k ? ' hud-btn-active' : ''}`} onClick={() => setTab(k)}>{label}</button>
+        ))}
+      </div>
+
+      {tab === 'dag' && (
+        <div className="dag-view">
+          {subs.map((x) => {
+            const incoming = deps.filter((e) => e.to === x.id).map((e) => e.from);
+            return (
+              <div key={x.id} className={`dag-node ${x.status === 'pending' && incoming.length > 0 ? 'dag-locked' : ''}`}>
+                <span className={statusClass(x.status)}>{x.status === 'completed' ? '✔' : x.status === 'failed' ? '✘' : '◐'}</span>{' '}
+                <strong>{x.title}</strong>
+                <span className="mono-dim">
+                  {' '}· 指纹 {x.fingerprint ? x.fingerprint.slice(0, 14) + '…' : '-'}
+                  {incoming.length > 0 && ` · 依赖 ${incoming.map((d) => (byId[d]?.title ?? d).slice(0, 10)).join(', ')}`}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {tab === 'lanes' && (
+        <div className="lane-view">
+          {Object.entries(lanes).map(([inc, list]) => (
+            <div key={inc} className="lane">
+              <div className="lane-head">◈ {inc} · 承载 {list.length} 个子任务</div>
+              {list.map((x) => (
+                <div key={x.id} className="lane-row">
+                  <span className={statusClass(x.status)}>{x.status}</span>{' '}
+                  {x.title} <span className="mono-dim">{fmtSpan(x.started_at, x.finished_at)}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {tab === 'timeline' && (
+        <div className="timeline-view">
+          {subs.filter((x) => x.kind !== 'review').map((x) => (
+            <div key={x.id} className="timeline-row">
+              <strong>{x.title}</strong>
+              <span className="mono-dim">
+                {' '}running {fmtTime(x.started_at)} → 完成 {fmtTime(x.finished_at)} · 质量档 {x.quality_status || 'self_check'} · 复核轮次 {x.review_round} · 重试 {x.attempt_count}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {tab === 'artifacts' && (
+        <div className="artifact-view">
+          <p className="hint">云端只存元数据与文档，产物实体留在孵化器本地（硬约束 #1）。</p>
+          <table className="hud-table">
+            <thead><tr><th>文档</th><th>类型</th><th>字数</th><th>时间</th></tr></thead>
+            <tbody>
+              {(docs.data ?? []).map((d) => (
+                <tr key={d.id}>
+                  <td>{d.title}</td>
+                  <td className="hud-running">{d.doc_type}</td>
+                  <td className="mono-dim">{d.word_count}</td>
+                  <td className="mono-dim">{fmtTime(d.created_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {(detail.err || dag.err || docs.err) && <p className="hud-failed" style={{ fontSize: 12 }}>详情接口异常：{detail.err ?? dag.err ?? docs.err}</p>}
+    </div>
+  );
+}
+
+// ── 运维平面 · 配置开关面板（UI §7.3 /ops/config：当前值/默认值/语义/边界）──
+function ConfigPanel() {
+  const { data, err } = usePoll(() => api.configSwitches(), 15000);
+  const rows = data?.data ?? [];
+  return (
+    <Panel title="配置开关与灰度" note="/ops/config · 当前值 / 默认值 / 语义 / 拦截边界">
+      {rows.length === 0 ? <Empty err={err} /> : (
+        <table className="hud-table">
+          <thead>
+            <tr><th>开关</th><th>当前</th><th>默认</th><th>开效果</th><th>关效果</th><th>拦截边界</th><th>来源</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key}>
+                <td className="mono-dim">{r.key}</td>
+                <td className={String(r.current) === String(r.default) ? 'hud-completed' : 'hud-warn'}>{String(r.current)}</td>
+                <td className="mono-dim">{String(r.default)}</td>
+                <td>{r.on_effect}</td>
+                <td>{r.off_effect}</td>
+                <td className="mono-dim">{r.boundary}</td>
+                <td className="mono-dim">{r.source}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Panel>
   );
 }
 
@@ -777,6 +922,7 @@ export function App() {
       </Panel>
 
       <CommandPanel refreshKey={refreshKey} />
+      <ConfigPanel />
       <PlatformsPanel refreshKey={refreshKey} />
     </div>
   );

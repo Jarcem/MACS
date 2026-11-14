@@ -365,3 +365,21 @@ img[src$=".webp"], img[src$=".gif"] { display: none; }
 
 /* 琥珀警告档（UI 8.2：overloaded / retransmitted / partial_failure / 超时） */
 .hud-warn { color: var(--hud-amber, #d9a441); }
+
+/* ── 任务详情四段式（UI §5.3）── */
+.task-detail {
+  margin-top: 8px;
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.2);
+}
+.task-detail-head { display: flex; gap: 12px; align-items: center; }
+.task-detail-tabs { display: flex; gap: 6px; margin: 8px 0; }
+.hud-btn-active { background: rgba(31, 159, 184, 0.4) !important; }
+.dag-node { padding: 3px 0; font-size: 12px; }
+.dag-locked { opacity: 0.55; }
+.lane { border-left: 2px solid var(--hud-line); padding-left: 10px; margin-bottom: 8px; }
+.lane-head { color: var(--hud-cyan, #1f9fb8); font-size: 11px; margin-bottom: 2px; }
+.lane-row { font-size: 12px; padding: 1px 0; }
+.timeline-row, .artifact-view p { font-size: 12px; padding: 1px 0; }
