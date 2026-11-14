@@ -312,6 +312,19 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks `
 
 > Bash 等价写法：把 `$env:VAR='v'` 换成 `VAR=v ./bin/xxx` 即可。
 
+### 本地开发脚本（启动/停止）
+
+冒烟与联调建议使用安全脚本，避免手工清理进程：
+
+```bash
+scripts/dev-start.sh tower incubator cmdterm   # 构建 + 启动 + 登记 PID（幂等）
+scripts/dev-stop.sh                            # 定向清理（SIGTERM + 身份核验 + 审计）
+```
+
+安全规则与回归测试（37 项断言）见 [scripts/README.md](scripts/README.md)。
+**禁止** `kill -9 $(lsof -ti -i :端口)` 式清理——裸 `-i` 会把全部联网进程 PID
+形成并集传给 kill，曾导致无关应用被批量误杀（详见该文件的事故记录）。
+
 一次成功的目标会经历（M3 三层质量管线）：
 
 ```
@@ -490,7 +503,8 @@ macs/
 ├─ macs-cmdterm/        受控命令终端（Go，:8472）：HMAC 签名 / 白名单 / 审计 / 注册重试
 ├─ macs-tower-web/      管理后台（React + Vite）：深色 HUD 单页（审批/质量/成本/归档/终端/平台面板）
 ├─ macs-dsh-monitor/    DSH 监控终端（Ink TUI，只读）
-├─ design/              技术设计 / UI 设计 / 数据库设计 / 协议变更说明
+├─ scripts/             开发环境启停脚本 + 进程安全清理库（含 37 项回归测试）
+├─ design/              技术设计 / UI 设计 / 数据库设计 / 协议变更说明 / 设计实现对照表
 ├─ architecture/        云 Agent 生态架构图
 ├─ bin/                 构建产物（不入库）
 └─ docker-compose.yml   本地 PostgreSQL（可选）

@@ -314,6 +314,19 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks `
 
 > Bash equivalent: replace `$env:VAR='v'` with `VAR=v ./bin/xxx`.
 
+### Local dev scripts (start/stop)
+
+Use the safe scripts for smoke testing — never hand-roll process cleanup:
+
+```bash
+scripts/dev-start.sh tower incubator cmdterm   # build + run + register PIDs (idempotent)
+scripts/dev-stop.sh                            # targeted stop (SIGTERM + identity check + audit)
+```
+
+Safety rules and the 37-assertion regression suite: [scripts/README.md](scripts/README.md).
+**Never** use `kill -9 $(lsof -ti -i :port)` style cleanup — a bare `-i` unions every
+networked process PID into the kill list (incident record in that file).
+
 A successful goal goes through (M3 three-layer quality pipeline):
 
 ```
@@ -491,7 +504,8 @@ macs/
 ├─ macs-cmdterm/        Controlled command terminal (Go, :8472): HMAC signing / allowlist / audit / register retry
 ├─ macs-tower-web/      Admin console (React + Vite): dark single-page HUD (approvals / quality / cost / archive / terminals / platforms)
 ├─ macs-dsh-monitor/    DSH monitoring terminal (Ink TUI, read-only)
-├─ design/              Technical / UI / storage design documents
+├─ scripts/             Dev start/stop scripts + safe process-cleanup library (37 regression assertions)
+├─ design/              Technical / UI / storage design documents + design-vs-implementation mapping
 ├─ architecture/        Cloud agent ecosystem architecture diagram
 ├─ bin/                 Build output (not committed)
 └─ docker-compose.yml   Local PostgreSQL (optional)
