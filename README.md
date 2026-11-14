@@ -314,13 +314,15 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks `
 
 > Bash equivalent: replace `$env:VAR='v'` with `VAR=v ./bin/xxx`.
 
-A successful goal goes through:
+A successful goal goes through (M3 three-layer quality pipeline):
 
 ```
-POST /api/v1/tasks  →  goal is split by character into subtasks A / B (parallelizable)
-                    →  slot-based placement: A → worker-a:8473, B → worker-b:8474
-                    →  each replies ACK → worker incubated → real analysis
-                    →  execution_result upstream → 50% → 100% → completed
+POST /api/v1/tasks  →  goal is split by character into subtasks A / B (parallelizable) + merge C
+                    →  6.4.7 scored selection → broadcast first-ACK-wins dispatch (§6.4.8)
+                    →  each replies ACK → worker incubated → real analysis + self-check report
+                    →  independent review worker re-runs and compares fingerprints (approved / E04 rework)
+                    →  execution_result upstream → cloud spot check (E06 trace-chain reconciliation)
+                    →  archived (handoff / review / final summary) → completed
 ```
 
 At `http://localhost:5173` you'll see: KPIs (online incubators x/y, running, total tasks, dispatch entries), task cards with progress bars, a subtask table (status / node / worker / duration / result), cluster status and topology, and the dispatch log.
@@ -363,55 +365,88 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 
 `macs-tower`
 
-| Variable                | Default             | Description                                       |
-| ----------------------- | ------------------- | ------------------------------------------------- |
-| `MACS_TOWER_UDP_PORT`   | `8470`              | UDP envelope protocol port                        |
-| `MACS_TOWER_HTTP_PORT`  | `8471`              | HTTP admin port                                   |
-| `MACS_TOWER_DB`         | `macs-tower.db`     | SQLite file path                                  |
-| `MACS_MIGRATIONS_DIR`   | `migrations`        | SQL migration directory                           |
-| `MACS_REGISTER_TOKEN`   | empty (dev mode)    | Incubator registration token                      |
-| `MACS_ADMIN_TOKEN`      | empty               | `/api/v1` admin token (reserved)                  |
-| `DATABASE_URL`          | empty (uses SQLite) | PostgreSQL reserved (see `docker-compose.yml`)    |
+| Variable                   | Default             | Description                                                      |
+| -------------------------- | ------------------- | ---------------------------------------------------------------- |
+| `MACS_TOWER_UDP_PORT`      | `8470`              | UDP envelope protocol port                                       |
+| `MACS_TOWER_HTTP_PORT`     | `8471`              | HTTP admin port                                                  |
+| `MACS_TOWER_DB`            | `macs-tower.db`     | SQLite file path                                                 |
+| `MACS_MIGRATIONS_DIR`      | `migrations`        | SQL migration directory                                          |
+| `MACS_REGISTER_TOKEN`      | empty (dev mode)    | Incubator registration token                                     |
+| `MACS_ADMIN_TOKEN`         | empty               | Bootstrap admin token (danger scope; empty = dev mode, open)     |
+| `DATABASE_URL`             | empty (uses SQLite) | PostgreSQL reserved (see `docker-compose.yml`)                   |
+| `MACS_FEATURE_REVIEW`      | `1`                 | Independent review toggle (10.3 feature.review.enabled)          |
+| `MACS_FEATURE_SPOT_CHECK`  | `0`                 | Cloud spot-check toggle (10.3 feature.spot_check.enabled)        |
+| `MACS_SPOT_CHECK_RATIO`    | `20`                | Spot-check sampling ratio (Q7)                                   |
+| `MACS_MAX_REVIEW_ROUNDS`   | `3`                 | Max review rework rounds (Q5)                                    |
+| `MACS_BROADCAST_ENABLED`   | `1`                 | Broadcast dispatch first-ACK-wins (off = targeted unicast)       |
+| `MACS_REBALANCE_ENABLED`   | `1`                 | Global load rebalancing (every 30s)                              |
+| `MACS_SUBTASK_TTL_MIN`     | `30`                | Worker TTL (destroy on timeout + E01 retry)                      |
+| `MACS_MAX_RETRIES`         | `3`                 | Max subtask failure retries (E01)                                |
 
 `macs-incubator`
 
-| Variable                | Default             | Description                            |
-| ----------------------- | ------------------- | -------------------------------------- |
-| `MACS_TOWER_HOST`       | `127.0.0.1`         | Tower address                          |
-| `MACS_TOWER_PORT`       | `8470`              | Tower UDP port                         |
-| `MACS_INCUBATOR_PORT`   | `8473`              | Local listen port                      |
-| `MACS_INCUBATOR_NAME`   | `dev-incubator`     | Instance name (prefix for `worker_id`) |
-| `MACS_MAX_WORKERS`      | `4`                 | Local concurrency slots                |
-| `MACS_INCUBATOR_DB`     | `incubator.db`      | Offline-buffer SQLite file             |
-| `MACS_INCUBATOR_TOKEN`  | empty               | Registration token                     |
-| `MACS_ALLOW_CLI_AGENT`  | empty (off)         | Set to `1` to enable `cli_agent`        |
-| `MACS_AGENT_ALLOW`      | empty (deny all)    | CLI executable allowlist, comma-separated |
+| Variable                   | Default                     | Description                                        |
+| -------------------------- | --------------------------- | -------------------------------------------------- |
+| `MACS_TOWER_HOST`          | `127.0.0.1`                 | Tower address                                      |
+| `MACS_TOWER_PORT`          | `8470`                      | Tower UDP port                                     |
+| `MACS_INCUBATOR_PORT`      | `8473`                      | Local listen port                                  |
+| `MACS_INCUBATOR_NAME`      | `dev-incubator`             | Instance name (prefix for `worker_id`)             |
+| `MACS_MAX_WORKERS`         | `4`                         | Local concurrency slots                            |
+| `MACS_INCUBATOR_DB`        | `incubator.db`              | Offline-buffer SQLite file                         |
+| `MACS_INCUBATOR_TOKEN`     | empty                       | Registration token                                 |
+| `MACS_ALLOW_CLI_AGENT`     | empty (off)                 | Set to `1` to enable `cli_agent`                   |
+| `MACS_AGENT_ALLOW`         | empty (deny all)            | CLI executable allowlist, comma-separated          |
+| `MACS_OPENAI_API_KEY`      | empty                       | OpenAI-compatible protocol driver credential (never sent to tower) |
+| `MACS_OPENAI_BASE_URL`     | `https://api.openai.com/v1` | Compatible gateway URL (third-party OK)            |
+| `MACS_OPENAI_MODEL`        | empty                       | Default model (per-step override supported)        |
+| `MACS_ANTHROPIC_API_KEY`   | empty                       | Anthropic protocol driver credential (never sent to tower) |
+| `MACS_ANTHROPIC_MODEL`     | empty                       | Default model                                      |
 
 `macs-cmdterm`
 
-| Variable                | Default                                         | Description                           |
-| ----------------------- | ----------------------------------------------- | ------------------------------------- |
-| `MACS_CMDTERM_PORT`     | `8472`                                          | Command channel port                  |
-| `MACS_CMDTERM_SECRET`   | empty (rejects all commands)                    | HMAC-SHA256 secret shared with tower  |
-| `MACS_CMDTERM_ALLOW`    | `systeminfo,ipconfig,dir,type,hostname,whoami`  | Command allowlist                     |
+| Variable                | Default                                         | Description                                              |
+| ----------------------- | ----------------------------------------------- | -------------------------------------------------------- |
+| `MACS_CMDTERM_PORT`     | `8472`                                          | Command channel port                                     |
+| `MACS_CMDTERM_ID`       | random                                          | Terminal ID (must match a tower-side registered terminal) |
+| `MACS_CMDTERM_SECRET`   | empty (rejects all commands)                    | Per-terminal secret generated at registration (shown once) |
+| `MACS_CMDTERM_ALLOW`    | `systeminfo,ipconfig,dir,type,hostname,whoami`  | Command allowlist                                        |
 
 <br/>
 
 ## HTTP API
 
-| Method | Path                            | Description                                |
-| ------ | ------------------------------- | ------------------------------------------ |
-| GET    | `/healthz`                      | Health check                               |
-| POST   | `/api/v1/tasks`                 | Submit a goal `{"goal":"..."}`, optional `plan` for local agents |
-| GET    | `/api/v1/tasks`                 | Task list (subtasks embedded)              |
-| GET    | `/api/v1/tasks/{id}/subtasks`   | Subtasks of a specific task                |
-| GET    | `/api/v1/incubators`            | Incubator online state                     |
-| GET    | `/api/v1/dispatch-log`          | Dispatch log (ACK status, response time)   |
-| GET    | `/api/v1/agent-platforms`       | Attached executors (builtin/cli_agent/http_agent) |
-| GET    | `/api/v1/platform-adapters`     | Platform adapter catalog                   |
-| GET    | `/api/v1/telemetry/events`      | Recent telemetry events                    |
-| GET    | `/api/v1/telemetry/stream`      | SSE real-time event stream                 |
-| POST   | `/api/v1/dispatch`              | Manual dispatch (debugging)                |
+| Method         | Path                                            | Description                                                            |
+| -------------- | ----------------------------------------------- | ---------------------------------------------------------------------- |
+| GET            | `/healthz`                                      | Health check                                                           |
+| POST           | `/api/v1/tasks`                                 | Submit a goal `{"goal":"..."}`; optional `plan` for agents, `budget_cents` budget |
+| GET            | `/api/v1/tasks`                                 | Task list (V3.3: `status`/`from`/`to`/`q`/`page`/`pageSize`/`sort`)    |
+| GET            | `/api/v1/tasks/{id}`                            | Task detail (budget spend + trace chain, V3.2)                         |
+| GET            | `/api/v1/tasks/{id}/subtasks`                   | Subtasks of a specific task                                            |
+| GET            | `/api/v1/tasks/{id}/dag`                        | Subtask DAG (V3.2)                                                     |
+| GET            | `/api/v1/tasks/{id}/workers`                    | Worker state projection (V3.2)                                         |
+| GET            | `/api/v1/tasks/{id}/events`                     | Task execution event feed (V3.2)                                       |
+| POST           | `/api/v1/tasks/{id}/cancel`                     | Cancel a task (ops scope)                                              |
+| GET            | `/api/v1/incubators`                            | Incubator online state and load profile                                |
+| GET            | `/api/v1/dispatch-log`                          | Dispatch log (ACK status, response time)                               |
+| GET/POST       | `/api/v1/approvals` · `/{id}/decision`          | Approval center (E04/E05/E09/guardrail scenes; decision = ops scope)   |
+| GET            | `/api/v1/spot-checks`                           | Spot-check records (E06 trace-chain reconciliation verdicts)           |
+| GET            | `/api/v1/trace?task_id=`                        | Trace chain query (with broken-fingerprint detection)                  |
+| GET            | `/api/v1/documents` · `/{id}`                   | Archive document library (handoff/review/final_summary)                |
+| GET            | `/api/v1/guardrails`                            | Guardrail events (6.4.10)                                              |
+| GET            | `/api/v1/costs/summary` · `/costs/records`      | Cost board (FR-21)                                                     |
+| GET/POST       | `/api/v1/budgets`                               | Multi-level budget caps (tower-side shrink-only, 6.4.11; POST = danger) |
+| GET/POST       | `/api/v1/templates` · `/{id}/deactivate`        | Agent template management (FR-22)                                      |
+| GET/POST/PATCH | `/api/v1/agent-platforms`                       | Unified agent platform registry (V3.0 §6.4.13.1)                       |
+| GET/POST       | `/api/v1/protocol-drivers`                      | Protocol driver registry (openai-compat / anthropic-msg / cli-native)  |
+| GET/POST       | `/api/v1/platform-adapters`                     | Platform-driver adapter mappings                                       |
+| GET            | `/api/v1/telemetry/events`                      | Telemetry events (filter by task/subtask/type)                         |
+| GET            | `/api/v1/telemetry/stream`                      | SSE real-time event stream                                             |
+| GET/POST       | `/api/v1/command-terminals`                     | Command terminal list / registration (danger scope; secret shown once) |
+| POST           | `/api/v1/command-terminals/{id}/exec`           | Issue a server command (danger scope; HMAC + nonce + 60s window)       |
+| POST           | `/api/v1/command-terminals/{id}/rotate-secret`  | Rotate terminal secret (danger scope; 10-minute dual-validity window)  |
+| GET            | `/api/v1/command-terminals/{id}/audit`          | Terminal command audit (A3 reconciliation)                             |
+| POST           | `/api/v1/admin-tokens`                          | Issue admin tokens (danger scope; read/ops/danger)                     |
+| POST           | `/api/v1/dispatch`                              | Manual dispatch (debugging, ops scope)                                 |
 
 <br/>
 
@@ -443,14 +478,16 @@ Yes. The board depends only on the tower's `/api/v1`. For a terminal form factor
 macs/
 ├─ macs-tower/          Control tower (Go): UDP gateway / dispatcher / orchestrator / cluster / store / events
 │  ├─ cmd/tower/        Entrypoint (UDP :8470 + HTTP :8471)
-│  ├─ internal/         gateway dispatcher orchestrator cluster store events udp
-│  └─ migrations/       0001_init.sql / 0002_tasks.sql
+│  ├─ internal/         gateway dispatcher orchestrator cluster registry store events udp
+│  │                    quality (review + spot check) approvals trace archive
+│  │                    billing templates unified (M6 protocol) cmdterm (M8) authz
+│  └─ migrations/       0001_init / 0002_tasks / 0003_quality (all M3~M8 tables)
 ├─ macs-incubator/      Incubator (Go): register / listen / slotted workers / upload / offline buffer
-│  ├─ cmd/incubator/    Entrypoint (UDP :8473)
-│  ├─ internal/         worker probe store
+│  ├─ cmd/incubator/    Entrypoint (UDP :8473; dispatch_inbox dedup + rollback)
+│  ├─ internal/         worker (self-check / review / OpenAI / Anthropic drivers) probe store
 │  └─ src/db/migrations/ Local SQLite schema
-├─ macs-cmdterm/        Controlled command terminal (Go, :8472): HMAC signing / allowlist / audit
-├─ macs-tower-web/      Admin console (React + Vite): dark single-page HUD
+├─ macs-cmdterm/        Controlled command terminal (Go, :8472): HMAC signing / allowlist / audit / register retry
+├─ macs-tower-web/      Admin console (React + Vite): dark single-page HUD (approvals / quality / cost / archive / terminals / platforms)
 ├─ macs-dsh-monitor/    DSH monitoring terminal (Ink TUI, read-only)
 ├─ design/              Technical / UI / storage design documents
 ├─ architecture/        Cloud agent ecosystem architecture diagram
@@ -465,12 +502,12 @@ macs/
 - ✅ **M1 Core communication link**: incubator registration + UDP send/receive + unicast dispatch + ACK + cluster manager + heartbeat
 - ✅ **M2 Single-worker execution (vertical slice)**: task table + subtask DAG + goal decomposition + real worker + result upload + progress aggregation + dependency-gated merge subtask + web task board
 - ✅ **M2.5 Local agent adapters**: `cli_agent` (argv launch + allowlist + timeout + output truncation) + `http_agent` (2xx verdict + response truncation) + plan DAG + web executor picker
-- ⚪ **M3 Quality and archiving**: review + spot checks + traceability chain + approvals + archiving
-- ⚪ **M4 Parallel execution hardening**: cross-incubator parallel scheduling + load rebalancing + merging + failure retries
-- ⚪ **M5 Polish**: cost center + AI semantic decomposition + TCP fallback channel + template marketplace
-- ⚪ **M6 Unified agent platform protocol**: protocol-driven registration and capability mapping + OpenAI/Anthropic drivers + AutoGen/LangChain/CrewAI adapters
-- ⚪ **M7 DSH monitoring terminal**: Ink TUI (skeleton ready, waiting for the full three-plane view)
-- ⚪ **M8 Command terminal**: signature verification + allowlisted execution + audit receipts (skeleton ready)
+- ✅ **M3 Quality and archiving**: self-check gate + independent review worker (E04 rework ≤3 rounds) + cloud spot checks (Q7 sampling + E06 trace-chain reconciliation) + approval center + archive documents
+- ✅ **M4 Parallel execution hardening**: 6.4.7 scored incubator selection (top-K) + broadcast first-ACK-wins (dispatch_commit + worker_rollback) + E01 exponential-backoff retries + worker TTL watchdog + rebalancing
+- ✅ **M5 Polish (phase 1)**: cost center + multi-level budgets (80% warn / 100% hard stop via E09 approval) + agent template management + webhook alerting
+- ✅ **M6 Unified agent platform protocol**: platform/driver/adapter registry + OpenAI/Anthropic protocol drivers (credential injection on incubator side + usage backfill) + telemetry events (SSE)
+- ✅ **M7 DSH monitoring terminal**: Ink TUI read-only monitor (REST/SSE data source aligned with the web HUD)
+- ✅ **M8 Command terminal**: per-terminal keys + HMAC-signed issuance (60s replay window) + allowlisted execution + register-ACK retry + audit reconciliation + secret rotation
 - ⚪ PostgreSQL production rollout + multi-tower federation
 
 <br/>

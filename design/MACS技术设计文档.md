@@ -847,6 +847,8 @@ else:
     return "sha256:" + sha256_hex(parent_fingerprint + content)
 ```
 
+> **链父选取口径（V3.5.2 实现澄清）**：并行子任务的父指纹统一取**任务根指纹**（`sha256(goal)`，落 `origin_traces` depth-0 节点），即子任务产物 fp = `sha256(task_root_fp + result)`。不用"前一个完成子任务"作链父——并行完成顺序不定，会使塔侧计算与 E06 对账的链父不一致而产生误报。复核子任务（kind=review）的输出是对账元数据而非产物，不入链。塔侧为指纹计算权威端（忽略 Worker 自带 fp，保证与对账口径一致）。
+
 #### 6.4.5 离线缓冲重试策略
 
 ```
@@ -1419,11 +1421,13 @@ CREATE INDEX idx_telemetry_events_type ON telemetry_events(event_type);
 
 ### 6.4.14 命令终端全生命周期（V3.5，模块 #32 补全）
 
-**注册与心跳（A1）**：cmdterm 启动后向塔发 `cmd_register`（携带 terminal_id / hostname / 白名单摘要），塔回 ACK 即上线；此后每 60s 发 `cmd_heartbeat`，连续 3 次（180s）未收判定离线。注册同样需 HMAC 预共享密钥签名，未配置密钥拒绝上线。
+**注册与心跳（A1）**：cmdterm 启动后向塔发 `cmd_register`（携带 terminal_id / hostname / 白名单摘要 / **listen_port 真实监听端口**），塔回 ACK 即上线；ACK 未达按每 5s 重试至多 12 次（6.2.2 同口径）。此后每 60s 发 `cmd_heartbeat`，连续 3 次（180s）未收判定离线；**心跳只刷新 last_heartbeat / last_ip，不覆盖注册时登记的 listen_port**（否则 cmd_exec 会发向临时源端口）。注册同样需 HMAC 预共享密钥签名，未配置密钥拒绝上线。
 
-**密钥管理（A2）**：每终端独立密钥（禁止全局一把）；密钥由塔侧在 `POST /command-terminals` 登记时生成并一次性展示，本地仅存 `.env`；轮换走 `POST /command-terminals/:id/rotate-secret`，塔侧保留新旧密钥 10 分钟双验窗口后废弃旧钥。
+**密钥管理（A2）**：每终端独立密钥（禁止全局一把）；密钥由塔侧在 `POST /command-terminals` 登记时生成并一次性展示，本地仅存 `.env`；轮换走 `POST /command-terminals/:id/rotate-secret`，塔侧保留新旧密钥 10 分钟双验窗口后废弃旧钥。塔侧必须持有密钥原文以签发 `cmd_exec` 并校验上行 HMAC（哈希不可逆）。
 
-**审计对账（A3）**：cmdterm 本地 `cmdterm-audit.jsonl` 与塔侧 `command_audit` 表双写；塔侧提供 `GET /api/v1/command-terminals/:id/audit` 按 terminal_id + 日期查询；对账规则：以 `cmd_result.msg_id` 与本地审计行一一比对，缺失即告警（追溯链机制复用）。
+**签名体口径**：`cmd_exec` 下行的 HMAC 签名体为 `{command, nonce, ts}` 三字段（cmdterm verify 契约，terminal_id 仅作路由不入签）；上行 `cmd_register` / `cmd_heartbeat` / `cmd_result` 的签名体为完整 payload 去除 signature 后的 JSON（map 字典序重建，双端同构）；`cmd_result` 载荷必须携带 `terminal_id` 供塔定位密钥。
+
+**审计对账（A3）**：cmdterm 本地 `cmdterm-audit.jsonl` 与塔侧 `command_audit` 表双写；塔侧提供 `GET /api/v1/command-terminals/:id/audit` 按 terminal_id + 日期查询；对账规则：以 `cmd_result.msg_id` 与本地审计行一一比对，缺失即告警（追溯链机制复用）；白名单拒绝的指令同样落审计（reject 原因随 `cmd_result.result.reject` 回传）。
 
 ### 6.4.15 统一错误响应（V3.5，B4）
 
@@ -1870,6 +1874,7 @@ Admin Token 三级 scope：`read`（监控只读）/ `ops`（任务创建、审�
 | V3.5 | 2026-11-08 | — | A/B/C 缺陷补全：§6.4.14 命令终端全生命周期（`cmd_register` / `cmd_heartbeat` 消息、每终端独立密钥与轮换、审计双写对账）；§6.4.15 统一错误响应（660xx~665xx 码段与 HTTP 映射）；§6.4.16 令牌与权限模型（Admin Token read/ops/danger 三级 scope，danger 操作强制审批）；§6.4.17 工程配套（JSONL 日志规范、SQLite 快照与回迁工具、告警通知通道、npm 包部署与滚动升级）；附录 B.1 新增 2 消息 + 6 端点 |
 | V3.5.1 | 2026-11-08 | — | 同步修复：V3.5 三实体补入 DB 设计（§2.10c `command_audit` / `admin_tokens` / `notify_channels`，云端 16→19 表）与 Prisma schema；UDP 契约类型补 `cmd_register` / `cmd_heartbeat` 上行与信封版本 `3.5`；UI 附录 A 补 Admin Token 管理（`/ops/admin-tokens` P1）与通知渠道配置（`/ops/notify-channels` P2）页面 |
 | V3.6 | 2026-11-08 | — | 服务端技术栈定版 Go 1.22+：tower / incubator / cmdterm 三仓由 Node+TS 改为 Go（标准库 net UDP + net/http + database/sql，SQLite 驱动 modernc.org/sqlite）；UDP 契约类型单一事实源迁至 `macs-tower/internal/udp/envelope.go`；DB 迁移由 Prisma 改为 `macs-tower/migrations/` SQL 脚本；macs-tower-web（React）与 macs-dsh-monitor（Ink/TS，harness 插件生态）保持不变；§3.6 / 模块 #14 同步 |
+| V3.5.2 | 2026-11-15 | — | **M3~M8 首版实现落地**（对应里程碑排期 §14.1）：M3 三层质量保障（自检门/独立复核 E04/云端抽查 E05/追溯链 E06）+ 审批中心 + 归档中心；M4 广播 first-ACK-wins（dispatch_commit/worker_rollback）+ 6.4.7 评分选机 + E01 重试 + Worker TTL 看门狗 + 再平衡；M5 成本中心 + 多级预算 E09 + 模板管理 + webhook 通知；M6 统一协议三表 + OpenAI/Anthropic 协议驱动（凭据孵化器侧注入）+ 遥测事件；M8 命令终端塔侧（登记/密钥/轮换/exec 签发/审计对账）+ Admin Token 三级 scope + 统一错误响应。实现澄清（正文同步）：6.4.4 链父取任务根指纹（并行确定性）；6.4.14 cmd_register 携带 listen_port、心跳不覆盖监听端口、注册 ACK 重试 ≤12 次、cmd_exec 签名体 {command,nonce,ts}、cmd_result 携带 terminal_id。云端迁移 0003_quality.sql（§2 全部表 SQLite 兼容子集）；Go 单测覆盖 12.1 清单（指纹链/退避契约/DAG 环检测/评分选机/能力过滤/预算门/签名双向契约）；端到端冒烟通过（广播双承接 E16 幂等吸收、抽查 passed、审计闭环）。AI 语义拆解 / TCP 兜底 / 模板市场按 §3.3 留后续迭代 |
 
 > 铁律：正文改净、此处记账。禁止把最终口径只写在这里。
 

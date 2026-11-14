@@ -312,13 +312,15 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks `
 
 > Bash 等价写法：把 `$env:VAR='v'` 换成 `VAR=v ./bin/xxx` 即可。
 
-一次成功的目标会经历：
+一次成功的目标会经历（M3 三层质量管线）：
 
 ```
-POST /api/v1/tasks  →  goal 按字符对半切为子任务 A / B（可并行）
-                    →  按空槽选机：A → worker-a:8473，B → worker-b:8474
-                    →  每台回 ACK → 孵化 Worker → 真实统计
-                    →  execution_result 上行 → 进度 50% → 100% → completed
+POST /api/v1/tasks  →  goal 按字符对半切为子任务 A / B（可并行）+ 汇总 C
+                    →  6.4.7 评分选机 → 广播 first-ACK-wins 下发（§6.4.8）
+                    →  每台回 ACK → 孵化 Worker → 真实统计 + 自检报告
+                    →  独立复核 Worker 重跑比对指纹（approved / E04 打回）
+                    →  execution_result 上行 → 云端抽查（E06 追溯链对账）
+                    →  归档（交接文档 / 复核报告 / 终审汇总）→ completed
 ```
 
 在 `http://localhost:5173` 上可以看到：KPI（在线孵化器 x/y、进行中、任务总数、调度记录）、任务卡片与进度条、子任务表（状态 / 执行节点 / worker / 耗时 / 结果）、集群状态与拓扑、调度记录。
@@ -361,55 +363,88 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 
 `macs-tower`
 
-| 变量                    | 默认                | 说明                                        |
-| ----------------------- | ------------------- | ------------------------------------------- |
-| `MACS_TOWER_UDP_PORT`   | `8470`              | UDP 信封协议端口                            |
-| `MACS_TOWER_HTTP_PORT`  | `8471`              | HTTP 管理端口                               |
-| `MACS_TOWER_DB`         | `macs-tower.db`     | SQLite 文件路径                             |
-| `MACS_MIGRATIONS_DIR`   | `migrations`        | SQL 迁移目录                                |
-| `MACS_REGISTER_TOKEN`   | 空（开发模式）      | 孵化器注册令牌                              |
-| `MACS_ADMIN_TOKEN`      | 空                  | `/api/v1` 管理令牌（预留）                  |
-| `DATABASE_URL`          | 空（用 SQLite）     | 预留 PostgreSQL（见 `docker-compose.yml`）  |
+| 变量                       | 默认                | 说明                                                       |
+| -------------------------- | ------------------- | ---------------------------------------------------------- |
+| `MACS_TOWER_UDP_PORT`      | `8470`              | UDP 信封协议端口                                           |
+| `MACS_TOWER_HTTP_PORT`     | `8471`              | HTTP 管理端口                                              |
+| `MACS_TOWER_DB`            | `macs-tower.db`     | SQLite 文件路径                                            |
+| `MACS_MIGRATIONS_DIR`      | `migrations`        | SQL 迁移目录                                               |
+| `MACS_REGISTER_TOKEN`      | 空（开发模式）      | 孵化器注册令牌                                             |
+| `MACS_ADMIN_TOKEN`         | 空                  | Admin Token 引导令牌（danger scope；空 = 开发模式放行）    |
+| `DATABASE_URL`             | 空（用 SQLite）     | 预留 PostgreSQL（见 `docker-compose.yml`）                 |
+| `MACS_FEATURE_REVIEW`      | `1`                 | 独立复核开关（10.3 feature.review.enabled）                |
+| `MACS_FEATURE_SPOT_CHECK`  | `0`                 | 云端抽查开关（10.3 feature.spot_check.enabled）            |
+| `MACS_SPOT_CHECK_RATIO`    | `20`                | 抽查抽样比例（Q7）                                         |
+| `MACS_MAX_REVIEW_ROUNDS`   | `3`                 | 复核最大打回轮次（Q5）                                     |
+| `MACS_BROADCAST_ENABLED`   | `1`                 | 广播下发 first-ACK-wins（关闭则点名单播）                  |
+| `MACS_REBALANCE_ENABLED`   | `1`                 | 全局负载再平衡（每 30s）                                   |
+| `MACS_SUBTASK_TTL_MIN`     | `30`                | Worker TTL（超时销毁 + E01 重试）                          |
+| `MACS_MAX_RETRIES`         | `3`                 | 子任务失败重试上限（E01）                                  |
 
 `macs-incubator`
 
-| 变量                        | 默认                | 说明                          |
-| --------------------------- | ------------------- | ----------------------------- |
-| `MACS_TOWER_HOST`           | `127.0.0.1`         | 调度塔地址                    |
-| `MACS_TOWER_PORT`           | `8470`              | 调度塔 UDP 端口               |
-| `MACS_INCUBATOR_PORT`       | `8473`              | 本实例监听端口                |
-| `MACS_INCUBATOR_NAME`       | `dev-incubator`     | 实例名（worker_id 前缀）      |
-| `MACS_MAX_WORKERS`          | `4`                 | 本机并发槽                    |
-| `MACS_INCUBATOR_DB`         | `incubator.db`      | 离线缓冲 SQLite 文件          |
-| `MACS_INCUBATOR_TOKEN`      | 空                  | 注册令牌                      |
-| `MACS_ALLOW_CLI_AGENT`      | 空（关闭）          | 设为 `1` 才允许 `cli_agent`    |
-| `MACS_AGENT_ALLOW`          | 空（全拒）          | CLI 可执行文件白名单，逗号分隔 |
+| 变量                        | 默认                        | 说明                                     |
+| --------------------------- | --------------------------- | ---------------------------------------- |
+| `MACS_TOWER_HOST`           | `127.0.0.1`                 | 调度塔地址                               |
+| `MACS_TOWER_PORT`           | `8470`                      | 调度塔 UDP 端口                          |
+| `MACS_INCUBATOR_PORT`       | `8473`                      | 本实例监听端口                           |
+| `MACS_INCUBATOR_NAME`       | `dev-incubator`             | 实例名（worker_id 前缀）                 |
+| `MACS_MAX_WORKERS`          | `4`                         | 本机并发槽                               |
+| `MACS_INCUBATOR_DB`         | `incubator.db`              | 离线缓冲 SQLite 文件                     |
+| `MACS_INCUBATOR_TOKEN`      | 空                          | 注册令牌                                 |
+| `MACS_ALLOW_CLI_AGENT`      | 空（关闭）                  | 设为 `1` 才允许 `cli_agent`              |
+| `MACS_AGENT_ALLOW`          | 空（全拒）                  | CLI 可执行文件白名单，逗号分隔           |
+| `MACS_OPENAI_API_KEY`       | 空                          | OpenAI 兼容协议驱动凭据（不上塔）        |
+| `MACS_OPENAI_BASE_URL`      | `https://api.openai.com/v1` | 兼容网关地址（可接第三方）               |
+| `MACS_OPENAI_MODEL`         | 空                          | 默认模型（任务可按步覆盖）               |
+| `MACS_ANTHROPIC_API_KEY`    | 空                          | Anthropic 协议驱动凭据（不上塔）         |
+| `MACS_ANTHROPIC_MODEL`      | 空                          | 默认模型                                 |
 
 `macs-cmdterm`
 
-| 变量                    | 默认                                                      | 说明                                  |
-| ----------------------- | --------------------------------------------------------- | ------------------------------------- |
-| `MACS_CMDTERM_PORT`     | `8472`                                                    | 命令通道端口                          |
-| `MACS_CMDTERM_SECRET`   | 空（拒绝一切指令）                                        | 与塔共享的 HMAC-SHA256 密钥           |
-| `MACS_CMDTERM_ALLOW`    | `systeminfo,ipconfig,dir,type,hostname,whoami`            | 命令白名单                            |
+| 变量                    | 默认                                                      | 说明                                                    |
+| ----------------------- | --------------------------------------------------------- | ------------------------------------------------------- |
+| `MACS_CMDTERM_PORT`     | `8472`                                                    | 命令通道端口                                            |
+| `MACS_CMDTERM_ID`       | 随机                                                      | 终端 ID（与塔侧登记的终端对应）                         |
+| `MACS_CMDTERM_SECRET`   | 空（拒绝一切指令）                                        | 塔侧登记时生成（一次性展示）的独立密钥                  |
+| `MACS_CMDTERM_ALLOW`    | `systeminfo,ipconfig,dir,type,hostname,whoami`            | 命令白名单                                              |
 
 <br/>
 
 ## HTTP API
 
-| 方法   | 路径                            | 说明                                  |
-| ------ | ------------------------------- | ------------------------------------- |
-| GET    | `/healthz`                      | 健康检查                              |
-| POST   | `/api/v1/tasks`                 | 提交目标 `{"goal":"..."}`，可选 `plan` 接本机 Agent |
-| GET    | `/api/v1/tasks`                 | 任务列表（内嵌 subtasks）             |
-| GET    | `/api/v1/tasks/{id}/subtasks`   | 指定任务的子任务                      |
-| GET    | `/api/v1/incubators`            | 孵化器在线状态                        |
-| GET    | `/api/v1/dispatch-log`          | 调度记录（ACK 状态、应答时间）        |
-| GET    | `/api/v1/agent-platforms`       | 已接入执行方式（builtin/cli_agent/http_agent） |
-| GET    | `/api/v1/platform-adapters`     | 平台适配器清单                        |
-| GET    | `/api/v1/telemetry/events`      | 遥测事件（最近 N 条）                 |
-| GET    | `/api/v1/telemetry/stream`      | SSE 实时事件流                        |
-| POST   | `/api/v1/dispatch`              | 手工下发（调试用）                    |
+| 方法    | 路径                                          | 说明                                                          |
+| ------- | --------------------------------------------- | ------------------------------------------------------------- |
+| GET     | `/healthz`                                    | 健康检查                                                      |
+| POST   | `/api/v1/tasks`                 | 提交目标 `{"goal":"..."}`，可选 `plan` 接本机 Agent / `budget_cents` 任务预算 |
+| GET     | `/api/v1/tasks`                               | 任务列表（V3.3：`status`/`from`/`to`/`q`/`page`/`pageSize`/`sort`） |
+| GET     | `/api/v1/tasks/{id}`                          | 任务详情（预算消耗 + 追溯链，V3.2）                           |
+| GET     | `/api/v1/tasks/{id}/subtasks`                 | 指定任务的子任务                                              |
+| GET     | `/api/v1/tasks/{id}/dag`                      | 子任务 DAG（V3.2）                                            |
+| GET     | `/api/v1/tasks/{id}/workers`                  | 子 Worker 状态投影（V3.2）                                    |
+| GET     | `/api/v1/tasks/{id}/events`                   | 任务执行事件 feed（V3.2）                                     |
+| POST    | `/api/v1/tasks/{id}/cancel`                   | 取消任务（ops scope）                                         |
+| GET     | `/api/v1/incubators`                          | 孵化器在线状态与负载画像                                      |
+| GET     | `/api/v1/dispatch-log`                        | 调度记录（ACK 状态、应答时间）                                |
+| GET/POST| `/api/v1/approvals` · `/{id}/decision`        | 审批中心（E04/E05/E09/guardrail 场景，决策 ops scope）        |
+| GET     | `/api/v1/spot-checks`                         | 抽查记录（E06 追溯链对账结论）                                |
+| GET     | `/api/v1/trace?task_id=`                      | 追溯链查询（含 broken 检出）                                  |
+| GET     | `/api/v1/documents` · `/{id}`                 | 归档文档库（handoff/review/final_summary）                    |
+| GET     | `/api/v1/guardrails`                          | 护栏事件（6.4.10）                                            |
+| GET     | `/api/v1/costs/summary` · `/costs/records`    | 成本看板（FR-21）                                             |
+| GET/POST| `/api/v1/budgets`                             | 多级预算上界（塔侧仅收紧，6.4.11；POST danger scope）         |
+| GET/POST| `/api/v1/templates` · `/{id}/deactivate`      | Agent 模板管理（FR-22）                                       |
+| GET/POST/PATCH | `/api/v1/agent-platforms`              | 统一 Agent 平台注册表（V3.0 §6.4.13.1）                       |
+| GET/POST| `/api/v1/protocol-drivers`                    | 协议驱动注册表（openai-compat / anthropic-msg / cli-native）  |
+| GET/POST| `/api/v1/platform-adapters`                   | 平台-驱动适配映射                                             |
+| GET     | `/api/v1/telemetry/events`                    | 遥测事件（按 task/subtask/type 过滤）                         |
+| GET     | `/api/v1/telemetry/stream`                    | SSE 实时事件流                                                |
+| GET/POST| `/api/v1/command-terminals`                   | 命令终端列表 / 登记（登记 danger scope，密钥一次性展示）      |
+| POST    | `/api/v1/command-terminals/{id}/exec`         | 签发服务器指令（danger scope，HMAC + nonce + 60s 时间窗）     |
+| POST    | `/api/v1/command-terminals/{id}/rotate-secret`| 终端密钥轮换（danger scope，10 分钟双验窗口）                 |
+| GET     | `/api/v1/command-terminals/{id}/audit`        | 终端指令审计（A3 对账）                                       |
+| POST    | `/api/v1/admin-tokens`                        | 签发 Admin Token（danger scope，read/ops/danger）             |
+| POST    | `/api/v1/dispatch`                            | 手工下发（调试用，ops scope）                                 |
 
 <br/>
 
@@ -441,14 +476,17 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 macs/
 ├─ macs-tower/          调度塔（Go）：UDP 网关 / 调度 / 编排 / 集群 / 存储 / 事件总线
 │  ├─ cmd/tower/        入口（UDP :8470 + HTTP :8471）
-│  ├─ internal/         gateway dispatcher orchestrator cluster store events udp
-│  └─ migrations/       0001_init.sql / 0002_tasks.sql
+│  ├─ internal/         gateway dispatcher orchestrator cluster registry store events udp
+│  │                    quality（复核+抽查） approvals（审批） trace（追溯链） archive（归档）
+│  │                    billing（成本预算） templates（模板） unified（M6 统一协议）
+│  │                    cmdterm（M8 命令终端塔侧） authz（三级 scope）
+│  └─ migrations/       0001_init / 0002_tasks / 0003_quality（M3~M8 全量表）
 ├─ macs-incubator/      孵化器（Go）：注册 / 监听 / 并发槽 Worker / 回传 / 离线缓冲
-│  ├─ cmd/incubator/    入口（UDP :8473）
-│  ├─ internal/         worker probe store
+│  ├─ cmd/incubator/    入口（UDP :8473；dispatch_inbox 幂等 + rollback）
+│  ├─ internal/         worker（含自检/复核/OpenAI/Anthropic 驱动） probe store
 │  └─ src/db/migrations/ 本地 SQLite schema
-├─ macs-cmdterm/        受控命令终端（Go，:8472）：HMAC 签名 / 白名单 / 审计
-├─ macs-tower-web/      管理后台（React + Vite）：深色 HUD 单页
+├─ macs-cmdterm/        受控命令终端（Go，:8472）：HMAC 签名 / 白名单 / 审计 / 注册重试
+├─ macs-tower-web/      管理后台（React + Vite）：深色 HUD 单页（审批/质量/成本/归档/终端/平台面板）
 ├─ macs-dsh-monitor/    DSH 监控终端（Ink TUI，只读）
 ├─ design/              技术设计 / UI 设计 / 数据库设计 / 协议变更说明
 ├─ architecture/        云 Agent 生态架构图
@@ -463,12 +501,13 @@ macs/
 - ✅ **M1 核心通信链路**：孵化器注册 + UDP 收发 + 单播调度 + ACK + 集群管理 + 心跳
 - ✅ **M2 单 Worker 执行（垂直切片）**：任务表 + 子任务 DAG + 目标拆解 + 真实 Worker + 结果回传 + 进度聚合 + 依赖汇总子任务 + Web 任务看板
 - ✅ **M2.5 本机 Agent 接入**：`cli_agent`（argv 直启 + 白名单 + 超时 + 输出截断）+ `http_agent`（2xx 判定 + 响应截断）+ plan DAG + Web 执行方式选择
-- ⚪ **M3 质量与归档**：复核 + 抽查 + 追溯链 + 审批 + 归档
-- ⚪ **M4 并行执行完善**：跨孵化器并行调度 + 负载均衡再平衡 + 合并 + 失败重试
-- ⚪ **M5 完善优化**：成本中心 + AI 语义拆解 + TCP 兜底通道 + 模板市场
-- ⚪ **M6 统一 Agent 平台协议**：协议驱动注册与能力映射 + OpenAI/Anthropic 驱动 + AutoGen/LangChain/CrewAI 适配器
-- ⚪ **M7 DSH 监控终端**：Ink TUI（骨架已就绪，待接三平面完整视图）
-- ⚪ **M8 命令终端**：签名校验 + 白名单执行 + 审计回执（骨架已就绪）
+- ✅ **M3 质量与归档**：自检报告（done 验收门）+ 独立复核 Worker（E04 打回 ≤3 轮）+ 云端抽查引擎（Q7 抽样 + E06 追溯链对账）+ 审批中心（多场景 + 超时）+ 归档文档（交接/复核/终审汇总）
+- ✅ **M4 并行执行完善**：6.4.7 评分选机（空槽 + 负载 + 分散惩罚，top-K 候选）+ 6.4.8 广播 first-ACK-wins（dispatch_commit + worker_rollback 幂等回滚）+ E01 失败重试（指数退避）+ Worker TTL 看门狗 + 再平衡（overloaded 巡检）
+- ✅ **M5 完善优化（首期）**：成本中心（cost_records + 遥测回填）+ 多级预算（任务级/全局上界 + 80% 告警 + 100% 硬停 E09 审批恢复）+ Agent 模板管理（系统模板播种 + CRUD）+ webhook 告警通知
+- ✅ **M6 统一 Agent 平台协议**：协议驱动注册与能力映射三表 + OpenAI/Anthropic 协议驱动（孵化器侧凭据注入 + usage 回填成本）+ 遥测事件（telemetry_events + SSE）
+- ✅ **M7 DSH 监控终端**：Ink TUI 只读监控（REST/SSE 数据源，对齐 Web 看板）
+- ✅ **M8 命令终端**：每终端独立密钥 + HMAC 签发（60s 时间窗防重放）+ 白名单执行 + 注册 ACK 重试 + 审计双写对账 + 密钥轮换（10 分钟双验）
+- ⚙️ **后续迭代**：AI 语义拆解、TCP 兜底通道、模板市场、多租户（见主设计 §3.3 范围三态）
 - ⚪ PostgreSQL 正式落地 + 多塔联邦
 
 <br/>
