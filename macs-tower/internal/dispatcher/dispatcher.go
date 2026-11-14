@@ -127,6 +127,37 @@ func (d *Dispatcher) sendPacket(msgID, subtaskID string, taskDef map[string]any,
 	return err
 }
 
+// NotifyIncubator 向指定孵化器下发通用通知（6.4.3 下行指令全集对外出口：
+// task_cancelled / approval_result / template_updated / budget_changed 等）
+func (d *Dispatcher) NotifyIncubator(incubatorID, msgType string, payload map[string]any) {
+	if d == nil || d.conn == nil {
+		return // 测试/无网络环境
+	}
+	inc, err := d.store.GetIncubator(incubatorID)
+	if err != nil {
+		return
+	}
+	if dest, err := addrOf(&inc); err == nil {
+		d.sendNotice(msgType, payload, dest)
+	}
+}
+
+// BroadcastNotice 广播通知全部在线孵化器（template_updated / config_updated 等）
+func (d *Dispatcher) BroadcastNotice(msgType string, payload map[string]any) {
+	if d == nil || d.conn == nil {
+		return
+	}
+	list, err := d.store.ListIncubators(true)
+	if err != nil {
+		return
+	}
+	for i := range list {
+		if dest, err := addrOf(&list[i]); err == nil {
+			d.sendNotice(msgType, payload, dest)
+		}
+	}
+}
+
 // sendNotice 下行通用通知（dispatch_commit / worker_rollback / budget_changed 等；6.4.3 指令全集）
 func (d *Dispatcher) sendNotice(msgType string, payload map[string]any, dest *net.UDPAddr) {
 	env, err := udp.New(msgType, payload)
@@ -392,6 +423,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, subtaskID string, taskDef map
 
 // NoticeBudgetChanged 预算变更下行（6.4.11 budget_changed：limit_version 仅收紧不放宽）
 func (d *Dispatcher) NoticeBudgetChanged(incubatorID string, payload map[string]any) {
+	if d == nil || d.conn == nil {
+		return // 测试/无网络环境
+	}
 	inc, err := d.store.GetIncubator(incubatorID)
 	if err != nil {
 		return

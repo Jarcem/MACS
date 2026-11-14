@@ -35,3 +35,4 @@ tsconfig.tsbuildinfo
 .idea/
 .DS_Store
 Thumbs.db
+macs-cmdterm/cmdterm

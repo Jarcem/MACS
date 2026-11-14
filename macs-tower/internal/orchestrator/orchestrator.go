@@ -78,6 +78,8 @@ type Orchestrator struct {
 	kick    chan struct{}
 	mu      sync.Mutex // schedule 串行化（tick + kick 双入口）
 	inBatch bool
+	// 6.4.11 孵化器级预算：月度成本超限 → 停派 + budget_changed（状态翻转时通知一次）
+	budgetSuspended sync.Map // incubator_id → bool
 }
 
 func New(st *store.Store, disp *dispatcher.Dispatcher, hub *events.Hub,
@@ -91,8 +93,9 @@ func New(st *store.Store, disp *dispatcher.Dispatcher, hub *events.Hub,
 
 func (o *Orchestrator) Start() {
 	go o.loop()
-	go o.watchdog()   // 6.5 Worker 超时清理 + 重试退避回池
-	go o.rebalancer() // 6.4.7 rebalanceTick
+	go o.watchdog()     // 6.5 Worker 超时清理 + 重试退避回池
+	go o.rebalancer()   // 6.4.7 rebalanceTick
+	go o.monthlyReset() // 6.5 预算月度重置
 }
 
 // Notify 唤醒调度循环（去抖：已有待处理信号则跳过）
@@ -114,6 +117,70 @@ func (o *Orchestrator) loop() {
 			o.schedule()
 		}
 	}
+}
+
+// monthlyReset 6.5 预算月度重置：月滚动清零模板月度累计，
+// 清空孵化器超额标记并广播解除（budget_changed exceeded=false）
+func (o *Orchestrator) monthlyReset() {
+	last := time.Now().UTC().Format("2006-01")
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for range t.C {
+		cur := time.Now().UTC().Format("2006-01")
+		if cur == last {
+			continue
+		}
+		last = cur
+		n, err := o.st.ResetTemplateMonthlySpend()
+		if err != nil {
+			log.Printf(`{"level":"warn","module":"orchestrator","msg":"monthly reset: %v"}`, err)
+			continue
+		}
+		o.budgetSuspended.Range(func(k, v any) bool {
+			if v.(bool) {
+				o.disp.NoticeBudgetChanged(k.(string), map[string]any{"exceeded": false, "month": cur})
+			}
+			o.budgetSuspended.Store(k, false)
+			return true
+		})
+		o.hub.Publish("budget_monthly_reset", map[string]any{"month": cur, "templates_reset": n})
+		log.Printf("[orch] budget monthly reset: month=%s templates=%d", cur, n)
+	}
+}
+
+// checkIncubatorBudgets 6.4.11 孵化器级预算：当月成本超上界 → 停派 + budget_changed（状态翻转通知一次）
+func (o *Orchestrator) checkIncubatorBudgets(incs []store.Incubator) {
+	for i := range incs {
+		inc := incs[i]
+		lim, err := o.st.GetBudgetLimit("incubator", inc.ID)
+		if err != nil || lim.AmountCents <= 0 {
+			continue // 未设上界 = 不限
+		}
+		spent, err := o.st.IncubatorMonthlyCents(inc.ID)
+		if err != nil {
+			continue
+		}
+		exceeded := spent >= lim.AmountCents && lim.EnforceMode != "off"
+		prevAny, had := o.budgetSuspended.Load(inc.ID)
+		prev := had && prevAny.(bool)
+		if exceeded == prev {
+			continue
+		}
+		o.budgetSuspended.Store(inc.ID, exceeded)
+		o.disp.NoticeBudgetChanged(inc.ID, map[string]any{
+			"limit_version": lim.LimitVersion, "amount_cents": lim.AmountCents,
+			"spent_cents": spent, "exceeded": exceeded,
+		})
+		o.hub.Publish("budget_exceeded", map[string]any{
+			"incubator_id": inc.ID, "spent_cents": spent, "limit_cents": lim.AmountCents, "exceeded": exceeded,
+		})
+	}
+}
+
+// budgetSuspendedFor 孵化器是否因预算暂停承接（选机硬过滤）
+func (o *Orchestrator) budgetSuspendedFor(id string) bool {
+	v, ok := o.budgetSuspended.Load(id)
+	return ok && v.(bool)
 }
 
 // watchdog 每分钟：Worker TTL 超时清理（E02）+ 重试到期回池（E01）
@@ -512,6 +579,18 @@ func (o *Orchestrator) CancelTask(taskID string) error {
 	}
 	_ = o.st.SetTaskStatus(taskID, "cancelled")
 	o.hub.Publish("task_cancelled", map[string]any{"task_id": taskID})
+	// 6.4.3 下行接线：task_cancelled 通知涉及孵化器；在跑子任务凭 worker_rollback 幂等回滚
+	notif := map[string]any{"task_id": taskID, "goal": task.Goal}
+	sent := map[string]bool{}
+	for _, s := range subs {
+		if (s.Status == "dispatched" || s.Status == "running") && s.IncubatorID != "" {
+			o.disp.NotifyIncubator(s.IncubatorID, "worker_rollback", map[string]any{"subtask_id": s.ID})
+		}
+		if s.IncubatorID != "" && !sent[s.IncubatorID] {
+			o.disp.NotifyIncubator(s.IncubatorID, "task_cancelled", notif)
+			sent[s.IncubatorID] = true
+		}
+	}
 	return nil
 }
 
@@ -532,6 +611,7 @@ func (o *Orchestrator) schedule() {
 	}
 	running, _ := o.st.CountRunning()
 
+	o.checkIncubatorBudgets(incs)
 	tasks, err := o.st.ListTasks(0)
 	if err != nil {
 		return
@@ -666,11 +746,14 @@ func (o *Orchestrator) selectIncubators(incs []store.Incubator, running map[stri
 		if slots <= 0 || inc.ListenPort <= 0 || inc.LastIP == "" {
 			continue
 		}
-		// 硬过滤：协议驱动能力（§6.4.13.6 能力协商）+ 断路器（6.4.10 熔断期不承接）
+		// 硬过滤：协议驱动能力（§6.4.13.6）+ 断路器（6.4.10）+ 孵化器级预算（6.4.11）
 		if driver != "" && !hasDriver(inc.Drivers, driver) {
 			continue
 		}
 		if o.disp.CircuitOpen(inc.ID) {
+			continue
+		}
+		if o.budgetSuspendedFor(inc.ID) {
 			continue
 		}
 		idleScore := float64(slots) / float64(max(1, inc.Capacity))

@@ -32,6 +32,9 @@ func newTestEnv(t *testing.T) (*store.Store, *events.Hub, *approvals.Service, *S
 		`CREATE TABLE IF NOT EXISTS budget_limits (id TEXT PRIMARY KEY, scope_type TEXT NOT NULL, scope_id TEXT, amount_cents REAL NOT NULL DEFAULT 0, warn_at_pct INTEGER NOT NULL DEFAULT 80, enforce_mode TEXT NOT NULL DEFAULT 'hard', limit_version INTEGER NOT NULL DEFAULT 0, issued_at TEXT NOT NULL, UNIQUE(scope_type, scope_id))`,
 		`CREATE TABLE IF NOT EXISTS telemetry_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, subtask_id TEXT, worker_id TEXT NOT NULL DEFAULT '', platform_adapter TEXT NOT NULL DEFAULT '', agent_platform TEXT NOT NULL DEFAULT '', event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', timestamp TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS notify_channels (id TEXT PRIMARY KEY, kind TEXT NOT NULL, config TEXT NOT NULL DEFAULT '{}', min_level TEXT NOT NULL DEFAULT 'warn', enabled INTEGER NOT NULL DEFAULT 1)`,
+		`CREATE TABLE IF NOT EXISTS subtask_dependencies (subtask_id TEXT NOT NULL, depends_on_id TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(subtask_id, depends_on_id))`,
+		`CREATE TABLE IF NOT EXISTS parallel_groups (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, depth INTEGER NOT NULL, subtask_id TEXT NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS incubator_resources (id INTEGER PRIMARY KEY AUTOINCREMENT, incubator_id TEXT NOT NULL, cpu_cores INTEGER, mem_alloc_mb INTEGER, mem_sys_mb INTEGER, active_workers INTEGER, max_workers INTEGER, load_ratio REAL, reported_at TEXT NOT NULL)`,
 	} {
 		if _, err := st.Exec(ddl); err != nil {
 			t.Fatalf("ddl: %v", err)

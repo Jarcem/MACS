@@ -526,14 +526,15 @@ macs/
 - ✅ **M8 Command terminal**: per-terminal keys + HMAC-signed issuance (60s replay window) + allowlisted execution + register-ACK retry + audit reconciliation + secret rotation
 - ⚪ PostgreSQL production rollout + multi-tower federation
 
-**Known boundaries** (protocol/data plane ready, feature wiring pending):
+**Known boundaries** (protocol/data plane ready, feature wiring pending; full list in
+[design/设计实现对照表.md](design/设计实现对照表.md)):
 
-- `fetch_request` large-content chunked transfer: envelope constant defined; unused while artifacts stay <256KB
-- 6.4.10 guardrails: wake-loop freeze (frozen + guardrail approval), done acceptance gate and worker TTL watchdog are live; circuit breaker / idle-downgrade / bounded-context pending
-- Downlink commands `task_updated` / `approval_result` / `template_updated` / `config_updated` / `spot_check_request` / `merge_instruction`: constants ready, features wire on demand (task cancel already stops dispatching tower-side)
-- Incubator-side `budget_changed` enforcement pending (tower-side budget gate already active at the dispatch boundary)
-- 6.5 monthly budget reset and archive cleanup timers; cmdterm audit 90-day rotation
-- Local §3.7 self-check/review report tables (reports currently ride inside `execution_result` payload + tower-side archive)
+- 6.4.10 guardrails live: wake-loop freeze, done acceptance gate, circuit breaker, bounded context (LLM max-token cap), worker TTL watchdog
+- Downlink wired: `task_cancelled` (rollback running workers) / `approval_result` / `template_updated` / `budget_changed`; `task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` constants ready, wire on demand
+- 6.4.11 budgets enforced: task / global / incubator level (monthly window + budget_changed downlink); template level pending template-dispatch binding
+- 6.5 timers live: stale detection, ACK janitor, rebalance, worker TTL, spot-check retry, monthly budget reset, resource-snapshot cleanup
+- `fetch_request` large-content chunked transfer: protocol ready, unused while artifacts stay <256KB
+- Local §3.7 self-check/review report tables (reports ride inside `execution_result` payload + tower-side archive)
 
 <br/>
 

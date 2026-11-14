@@ -436,4 +436,35 @@ func (s *Store) ListTelemetryEvents(taskID, subtaskID, eventType string, limit i
 	return out, rows.Err()
 }
 
+// ── 孵化器资源快照（§2.1 incubator_resources）──
+
+type IncubatorResource struct {
+	IncubatorID   string  `json:"incubator_id"`
+	CpuCores      int     `json:"cpu_cores"`
+	MemAllocMB    int     `json:"mem_alloc_mb"`
+	MemSysMB      int     `json:"mem_sys_mb"`
+	ActiveWorkers int     `json:"active_workers"`
+	MaxWorkers    int     `json:"max_workers"`
+	LoadRatio     float64 `json:"load_ratio"`
+	ReportedAt    string  `json:"reported_at"`
+}
+
+// InsertIncubatorResource report 上行 → 资源画像历史快照
+func (s *Store) InsertIncubatorResource(r IncubatorResource) error {
+	_, err := s.db.Exec(`INSERT INTO incubator_resources(incubator_id,cpu_cores,mem_alloc_mb,mem_sys_mb,active_workers,max_workers,load_ratio,reported_at)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		r.IncubatorID, r.CpuCores, r.MemAllocMB, r.MemSysMB, r.ActiveWorkers, r.MaxWorkers, r.LoadRatio, r.ReportedAt)
+	return err
+}
+
+// PurgeIncubatorResources 归档清理（6.5）：保留 7 天
+func (s *Store) PurgeIncubatorResources() (int64, error) {
+	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour).Format(time.RFC3339)
+	res, err := s.db.Exec(`DELETE FROM incubator_resources WHERE reported_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 var _ = time.Now // 保留 time 引用（stale 判定在同包 store.go）

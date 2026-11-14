@@ -200,6 +200,24 @@ func main() {
 	}
 	log.Printf("[cmdterm] id=%s listening :%s tower=%s", terminalID, port, towerAddr)
 
+	// §6.4.17 C7：cmdterm 审计独立保留 90 天——每日检查，超龄归档轮转
+	go func() {
+		rotate := func() {
+			info, err := os.Stat("cmdterm-audit.jsonl")
+			if err != nil || time.Since(info.ModTime()) < 90*24*time.Hour {
+				return
+			}
+			archived := fmt.Sprintf("cmdterm-audit-%s.jsonl", time.Now().UTC().Format("20060102"))
+			if err := os.Rename("cmdterm-audit.jsonl", archived); err == nil {
+				log.Printf("[cmdterm] audit rotated (90d retention): %s", archived)
+			}
+		}
+		rotate()
+		for range time.Tick(24 * time.Hour) {
+			rotate()
+		}
+	}()
+
 	buf := make([]byte, 256*1024)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)

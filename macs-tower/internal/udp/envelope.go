@@ -33,7 +33,13 @@ const (
 	MsgCmdHeartbeat    = "cmd_heartbeat"  // V3.5 §6.4.14
 	// 下行：调度塔 → 孵化器/命令终端
 	MsgDispatch            = "dispatch"
-	MsgDispatchCommit      = "dispatch_commit" // 6.4.3：广播承接锁定通知（其余候选停止应答、不孵化）
+	MsgDispatchCommit      = "dispatch_commit"  // 6.4.3：广播承接锁定通知（其余候选停止应答、不孵化）
+	MsgTaskCancelled       = "task_cancelled"   // 6.4.3：任务取消通知
+	MsgTaskUpdated         = "task_updated"     // 6.4.3：任务定义更新
+	MsgApprovalResult      = "approval_result"  // 6.4.3：审批结果
+	MsgTemplateUpdated     = "template_updated" // 6.4.3：Agent 模板更新
+	MsgSpotCheckRequest    = "spot_check_request" // 6.4.3：抽查请求
+	MsgMergeInstruction    = "merge_instruction"  // 6.4.3：合并指令
 	MsgWorkerSpawn         = "worker_spawn"
 	MsgWorkerRollback      = "worker_rollback"
 	MsgBudgetChanged       = "budget_changed"

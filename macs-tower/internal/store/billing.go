@@ -4,6 +4,8 @@
 // 成本与预算访问层（FR-21，6.4.11 多级预算 + 塔侧上界）
 package store
 
+import "time"
+
 // CostRecord 成本记录（金额单位：分）
 type CostRecord struct {
 	ID          string `json:"id"`
@@ -113,6 +115,24 @@ func (s *Store) TaskCostCents(taskID string) (float64, error) {
 	var sum float64
 	err := s.db.QueryRow(`SELECT COALESCE(SUM(amount_cents),0) FROM cost_records WHERE task_id=?`, taskID).Scan(&sum)
 	return sum, err
+}
+
+// IncubatorMonthlyCents 指定孵化器当月（UTC）累计成本（6.4.11 孵化器级预算门）
+func (s *Store) IncubatorMonthlyCents(incubatorID string) (float64, error) {
+	monthStart := time.Now().UTC().Format("2006-01") + "-01T00:00:00Z"
+	var sum float64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(amount_cents),0) FROM cost_records
+		WHERE incubator_id=? AND recorded_at >= ?`, incubatorID, monthStart).Scan(&sum)
+	return sum, err
+}
+
+// ResetTemplateMonthlySpend 6.5 预算月度重置：每月滚动清零模板月度累计
+func (s *Store) ResetTemplateMonthlySpend() (int64, error) {
+	res, err := s.db.Exec(`UPDATE agent_templates SET spent_monthly_cents=0 WHERE spent_monthly_cents<>0`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // GlobalCostCents 全局累计成本（企业上界用）

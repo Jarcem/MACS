@@ -87,8 +87,63 @@ func scanSubtask(rows interface{ Scan(...any) error }) (Subtask, error) {
 	return x, err
 }
 
-// InsertTaskWithSubtasks 一个事务内落任务与其子任务
+// ValidateDag E10 依赖环检测（通用 DFS，创建时拒绝带环任务）
+// subs 的 depends_on 为逗号分隔子任务 ID（解析为邻接表后着色遍历）
+func ValidateDag(subs []Subtask) error {
+	adj := map[string][]string{}
+	ids := map[string]bool{}
+	for _, s := range subs {
+		ids[s.ID] = true
+		if s.DependsOn == "" {
+			continue
+		}
+		for _, d := range strings.Split(s.DependsOn, ",") {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				adj[s.ID] = append(adj[s.ID], d)
+			}
+		}
+	}
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := map[string]int{}
+	var visit func(string) error
+	visit = func(id string) error {
+		switch color[id] {
+		case gray:
+			return fmt.Errorf("dependency cycle detected at subtask %s (E10)", id)
+		case black:
+			return nil
+		}
+		color[id] = gray
+		for _, dep := range adj[id] {
+			if !ids[dep] {
+				continue
+			}
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		color[id] = black
+		return nil
+	}
+	for id := range ids {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// InsertTaskWithSubtasks 一个事务内落任务与其子任务，并规范化写入
+// subtask_dependencies（uk 防重）与 parallel_groups（依赖层数分组，§2.3/§2.4）
 func (s *Store) InsertTaskWithSubtasks(t Task, subs []Subtask) error {
+	if err := ValidateDag(subs); err != nil {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -106,11 +161,58 @@ func (s *Store) InsertTaskWithSubtasks(t Task, subs []Subtask) error {
 	if err != nil {
 		return err
 	}
+	depStmt, err := tx.Prepare(`INSERT OR IGNORE INTO subtask_dependencies(subtask_id,depends_on_id,created_at) VALUES(?,?,?)`)
+	if err != nil {
+		return err
+	}
+	grpStmt, err := tx.Prepare(`INSERT OR IGNORE INTO parallel_groups(id,task_id,depth,subtask_id,created_at) VALUES(?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
 	defer stmt.Close()
+	defer depStmt.Close()
+	defer grpStmt.Close()
 	for _, sub := range subs {
 		if _, err := stmt.Exec(sub.ID, sub.TaskID, sub.Seq, sub.Title, sub.Payload, sub.DependsOn,
 			sub.Status, sub.Kind, sub.ReviewOf, sub.AttemptCount, sub.MaxRetries, sub.Round,
 			sub.QualityStatus, sub.Fingerprint, sub.TemplateID, sub.RequiredDriver, sub.CreatedAt, sub.UpdatedAt); err != nil {
+			return err
+		}
+		if sub.DependsOn != "" {
+			for _, d := range strings.Split(sub.DependsOn, ",") {
+				d = strings.TrimSpace(d)
+				if d == "" {
+					continue
+				}
+				if _, err := depStmt.Exec(sub.ID, d, sub.CreatedAt); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	// 依赖层数（并行组）：depth = 1 + max(depth(deps))，同层可并行（§2.4）
+	depth := map[string]int{}
+	for changed := true; changed; {
+		changed = false
+		for _, sub := range subs {
+			if sub.DependsOn == "" {
+				continue
+			}
+			maxDep := 0
+			for _, d := range strings.Split(sub.DependsOn, ",") {
+				d = strings.TrimSpace(d)
+				if d != "" && depth[d] > maxDep {
+					maxDep = depth[d]
+				}
+			}
+			if nd := maxDep + 1; nd > depth[sub.ID] {
+				depth[sub.ID] = nd
+				changed = true
+			}
+		}
+	}
+	for _, sub := range subs {
+		if _, err := grpStmt.Exec(NewID(), sub.TaskID, depth[sub.ID], sub.ID, sub.CreatedAt); err != nil {
 			return err
 		}
 	}
@@ -196,6 +298,27 @@ func (s *Store) ListTasks(limit int) ([]Task, error) {
 func (s *Store) GetTask(id string) (Task, error) {
 	row := s.db.QueryRow(`SELECT `+taskCols+` FROM tasks WHERE id=?`, id)
 	return scanTask(row)
+}
+
+// CountSubtaskDependencies 依赖规范化行数（诊断/测试）
+func (s *Store) CountSubtaskDependencies() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM subtask_dependencies`).Scan(&n)
+	return n, err
+}
+
+// CountParallelGroups 并行组行数（诊断/测试）
+func (s *Store) CountParallelGroups() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM parallel_groups`).Scan(&n)
+	return n, err
+}
+
+// CountIncubatorResources 资源快照行数（诊断/测试）
+func (s *Store) CountIncubatorResources() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM incubator_resources`).Scan(&n)
+	return n, err
 }
 
 // SetTaskStatus 直接推进任务状态（blocked/cancelled 等非聚合态）

@@ -152,6 +152,10 @@ func main() {
 	appr.On(approvals.TypeGuardrail,
 		func(a store.Approval) { orch.OnGuardrailDecision(a.SubtaskID, true) },
 		func(a store.Approval) { orch.OnGuardrailDecision(a.SubtaskID, false) })
+	// 6.4.3 approval_result 下行（审批关联孵化器定向通知）
+	appr.SetDownlinkNotifier(func(incubatorID string, payload map[string]any) {
+		disp.NotifyIncubator(incubatorID, udp.MsgApprovalResult, payload)
+	})
 	appr.StartExpireSweeper()
 
 	orch.Start()
@@ -171,7 +175,12 @@ func main() {
 		var p struct {
 			IncubatorID string  `json:"incubator_id"`
 			Load        float64 `json:"load"`
-			Capacity    struct {
+			Probe       struct {
+				NumCPU     int `json:"num_cpu"`
+				MemAllocMB int `json:"mem_alloc_mb"`
+				MemSysMB   int `json:"mem_sys_mb"`
+			} `json:"probe"`
+			Capacity struct {
 				MaxWorkers    int `json:"max_workers"`
 				ActiveWorkers int `json:"active_workers"`
 			} `json:"capacity"`
@@ -184,6 +193,11 @@ func main() {
 				}
 			}
 			st.TouchWithLoad(p.IncubatorID, capacity, p.Capacity.ActiveWorkers, p.Load)
+			_ = cm.SaveResourceSnapshot(store.IncubatorResource{
+				IncubatorID: p.IncubatorID, CpuCores: p.Probe.NumCPU, MemAllocMB: p.Probe.MemAllocMB,
+				MemSysMB: p.Probe.MemSysMB, ActiveWorkers: p.Capacity.ActiveWorkers,
+				MaxWorkers: capacity, LoadRatio: p.Load, ReportedAt: time.Now().UTC().Format(time.RFC3339),
+			})
 		}
 		return nil, nil
 	})
@@ -605,6 +619,10 @@ func main() {
 			apiErr(w, 500, 66500, err.Error())
 			return
 		}
+		// 6.4.3 template_updated 广播（孵化器按需拉取；本阶段仅通知版本号）
+		disp.BroadcastNotice(udp.MsgTemplateUpdated, map[string]any{
+			"template_id": id, "name": t.Name, "new_version": t.Version,
+		})
 		wj(w, map[string]any{"id": id})
 		w.WriteHeader(http.StatusCreated)
 	}))

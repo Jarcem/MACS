@@ -525,15 +525,16 @@ macs/
 - ✅ **M8 命令终端**：每终端独立密钥 + HMAC 签发（60s 时间窗防重放）+ 白名单执行 + 注册 ACK 重试 + 审计双写对账 + 密钥轮换（10 分钟双验）
 - ⚙️ **后续迭代**：AI 语义拆解、TCP 兜底通道、模板市场、多租户（见主设计 §3.3 范围三态）
 
-**已知边界**（协议/数据面已就绪、特性未接线的部分）：
+**已知边界**（协议/数据面已就绪、特性未接线的部分；完整清单见
+[design/设计实现对照表.md](design/设计实现对照表.md)）：
 
-- `fetch_request` 大内容分片传输：UDP 信封常量已定义，当前产物均 <256KB 未启用
-- 6.4.10 护栏已实现唤醒环冻结（frozen + guardrail 审批）与 done 验收门 + Worker TTL 看门狗；断路器 / 空闲下岗 / 有界上下文待接入
-- 下行指令 `task_updated` / `approval_result` / `template_updated` / `config_updated` / `spot_check_request` / `merge_instruction`：协议常量就绪，对应特性按需接线（任务取消已在塔侧停派生效）
-- 孵化器侧 `budget_changed` 上界应用待接线（塔侧预算门已在派发边界生效）
-- 6.5 预算月度重置、归档清理定时任务；cmdterm 审计 90 天轮转
-- 孵化器本地 §3.7 自检/复核报告表（当前报告嵌入 `execution_result` 载荷 + 塔侧归档，不落本地表）
-- PostgreSQL 正式落地（当前 SQLite 单库，`DATABASE_URL` 预留）、多塔联邦
+- 6.4.10 护栏：唤醒环冻结 / done 验收门 / 断路器 / 有界上下文 / Worker TTL 看门狗已实现；空闲下岗由 TTL 看门狗等价覆盖
+- 下行指令 `task_cancelled` / `approval_result` / `template_updated` / `budget_changed` 已接线；`task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` 协议常量就绪待适用
+- 6.4.11 预算：任务级/全局/孵化器级已强制（月度窗口 + budget_changed 下行）；模板级待模板↔派发绑定打通
+- 6.5 定时任务：超时检测/ACK 兜底/再平衡/Worker TTL/抽查重试/预算月度重置/资源快照清理已实现
+- `fetch_request` 大内容分片传输：协议就绪，当前产物均 <256KB 未启用
+- 孵化器本地 §3.7 自检/复核报告表（报告嵌入 `execution_result` 载荷 + 塔侧归档）
+- PostgreSQL 正式落地（SQLite 单库 + `DATABASE_URL` 预留）、多塔联邦、AI 语义拆解、模板市场、插件化加载（§3.3 后续迭代）
 - ⚪ PostgreSQL 正式落地 + 多塔联邦
 
 <br/>

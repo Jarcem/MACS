@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,6 +42,17 @@ func failOutcome(format string, a ...any) Outcome {
 	return Outcome{Status: "failed", Error: fmt.Sprintf(format, a...)}
 }
 
+// maxTokensCap 有界上下文护栏（6.4.10）：单次请求 token 预算上限（孵化器侧硬顶），
+// 超限拒绝执行并标记 bounded_context——防止失控消耗（MACS_MAX_TOKENS_CAP 可调）
+func maxTokensCap() int {
+	if v := os.Getenv("MACS_MAX_TOKENS_CAP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 8192
+}
+
 // runLLM 统一驱动执行：构造请求 → 2xx 取 content → usage 随结果回传
 func runLLM(ctx context.Context, j Job, d llmDriver) Outcome {
 	baseURL, apiKey, defaultModel, ok := d.endpoint()
@@ -53,6 +65,9 @@ func runLLM(ctx context.Context, j Job, d llmDriver) Outcome {
 	}
 	if model == "" {
 		return failOutcome("%s: model required (job.model or env)", d.name)
+	}
+	if cap := maxTokensCap(); j.MaxTokens > cap {
+		return failOutcome("bounded_context: max_tokens %d exceeds incubator cap %d (6.4.10)", j.MaxTokens, cap)
 	}
 
 	req, err := d.buildReq(j, baseURL, apiKey, model)

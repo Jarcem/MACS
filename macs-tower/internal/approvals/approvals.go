@@ -33,6 +33,8 @@ type Service struct {
 	onApprove map[string]func(a store.Approval) // 场景 → 通过回调
 	onReject  map[string]func(a store.Approval) // 场景 → 拒绝回调
 	stop      chan struct{}
+	// 6.4.3 approval_result 下行通知（main 注入 dispatcher 出口；无网络环境为 nil）
+	onDownlink func(incubatorID string, payload map[string]any)
 }
 
 func New(st *store.Store, hub *events.Hub) *Service {
@@ -52,6 +54,11 @@ func (s *Service) On(approveType string, approved, rejected func(a store.Approva
 }
 
 func (s *Service) Close() { close(s.stop) }
+
+// SetDownlinkNotifier 注册 approval_result 下行出口（孵化器通知）
+func (s *Service) SetDownlinkNotifier(fn func(incubatorID string, payload map[string]any)) {
+	s.onDownlink = fn
+}
 
 // Raise 创建审批（幂等：同实体同类型仅一条 pending）
 func (s *Service) Raise(approveType, taskID, subtaskID, title, description string, payload any, ttl time.Duration) (store.Approval, error) {
@@ -96,6 +103,21 @@ func (s *Service) Decide(id, decision, approver, note string) (store.Approval, b
 		return a, false, err
 	}
 	a.Status, a.Approver, a.Decision, a.DecisionNote, a.DecidedAt = decision, approver, decision, note, time.Now().UTC().Format(time.RFC3339)
+	// 6.4.3 approval_result 下行：审批关联孵化器（或子任务所在孵化器）定向通知
+	if s.onDownlink != nil {
+		incID := a.IncubatorID
+		if incID == "" && a.SubtaskID != "" {
+			if sub, err := s.st.GetSubtask(a.SubtaskID); err == nil {
+				incID = sub.IncubatorID
+			}
+		}
+		if incID != "" {
+			s.onDownlink(incID, map[string]any{
+				"approval_id": a.ID, "approval_type": a.ApproveType, "decision": decision,
+				"task_id": a.TaskID, "subtask_id": a.SubtaskID,
+			})
+		}
+	}
 	s.hub.Publish("approval_decided", map[string]any{
 		"id": a.ID, "approval_type": a.ApproveType, "status": decision, "task_id": a.TaskID, "subtask_id": a.SubtaskID,
 	})

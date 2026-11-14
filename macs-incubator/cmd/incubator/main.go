@@ -137,6 +137,31 @@ func main() {
 	}
 	log.Printf("[incubator] registered id=%s listen=%s drivers=%v", incubatorID, port, localDrivers())
 
+	// ── 6.4.11 孵化器级预算：budget_changed 仅当 limit_version 更大时应用；超限拒承接新调度 ──
+	var budgetMu sync.Mutex
+	budgetSuspended := false
+	budgetVersion := int64(0)
+
+	applyBudget := func(payload json.RawMessage) {
+		var b struct {
+			LimitVersion int64 `json:"limit_version"`
+			Exceeded     bool  `json:"exceeded"`
+		}
+		if json.Unmarshal(payload, &b) != nil {
+			return
+		}
+		budgetMu.Lock()
+		defer budgetMu.Unlock()
+		if b.LimitVersion < budgetVersion {
+			return // 塔侧上界仅收紧不放宽：旧版本忽略（6.4.11）
+		}
+		budgetVersion = b.LimitVersion
+		if budgetSuspended != b.Exceeded {
+			budgetSuspended = b.Exceeded
+			log.Printf("[incubator] budget_changed v%d exceeded=%v → 拒绝承接新调度", b.LimitVersion, b.Exceeded)
+		}
+	}
+
 	// ── 模块 #18 spawner：并发槽 + 在跑子任务登记（worker_rollback 幂等销毁 E16）──
 	sem := make(chan struct{}, maxWorkers)
 	var workerSeq int64
@@ -252,6 +277,8 @@ func main() {
 			switch msg.Type {
 			case "ack":
 				continue // ACK 不再回 ACK，避免乒乓风暴
+			case "budget_changed":
+				applyBudget(msg.Payload) // 状态更新后落入通用 ACK 流程
 			case "dispatch_commit":
 				// 6.4.3：广播承接锁定通知 → 停止应答、不孵化；在跑则幂等销毁
 				var p struct {
@@ -300,14 +327,25 @@ func main() {
 			if dup {
 				ackBody["duplicate"] = true // 幂等回执：已执行过，仅重发 ACK
 			}
+			budgetMu.Lock()
+			suspended := budgetSuspended
+			budgetMu.Unlock()
+			if !dup && msg.Type == "dispatch" && suspended {
+				// 6.4.11：孵化器预算超限 → 拒绝承接新调度（ACK rejected，塔侧改派他机）
+				ackBody["ok"] = false
+				ackBody["reason"] = "budget_exceeded"
+				ackBody["accepted_subtask_id"] = ""
+			}
 			ack := newEnv("ack", ackBody)
 			ack.InReplyTo = msg.MsgID
 			b, _ := json.Marshal(ack)
 			_, _ = conn.WriteToUDP(b, src)
 
-			if !dup && msg.Type == "dispatch" {
+			if !dup && msg.Type == "dispatch" && !suspended {
 				log.Printf("[incubator] spawn worker subtask=%s", p.SubtaskID)
 				go execute(p.SubtaskID, p.TaskDef)
+			} else if !dup && msg.Type == "dispatch" && suspended {
+				log.Printf("[incubator] dispatch rejected subtask=%s (budget_exceeded)", p.SubtaskID)
 			}
 		}
 	}()

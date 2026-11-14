@@ -6,6 +6,7 @@
 package cluster
 
 import (
+	"log"
 	"time"
 
 	"macs.local/tower/internal/store"
@@ -29,20 +30,31 @@ func (m *Manager) Touch(incubatorID string) {
 	}
 }
 
-// StartSweeper 每 60s 将超期在线孵化器置为 offline
+// StartSweeper 每 60s 将超期在线孵化器置为 offline；每小时归档清理（6.5：资源快照保留 7 天）
 func (m *Manager) StartSweeper() {
 	go func() {
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
+		hourly := time.NewTicker(time.Hour)
+		defer hourly.Stop()
 		for {
 			select {
 			case <-t.C:
 				m.store.MarkStaleOffline(time.Now().Add(-staleAfter))
+			case <-hourly.C:
+				if n, err := m.store.PurgeIncubatorResources(); err == nil && n > 0 {
+					log.Printf(`{"level":"info","module":"cluster","msg":"resources purged","count":%d}`, n)
+				}
 			case <-m.stop:
 				return
 			}
 		}
 	}()
+}
+
+// SaveResourceSnapshot report 上行 → 资源画像历史（§2.1 incubator_resources）
+func (m *Manager) SaveResourceSnapshot(r store.IncubatorResource) error {
+	return m.store.InsertIncubatorResource(r)
 }
 
 func (m *Manager) Close() { close(m.stop) }
