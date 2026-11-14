@@ -6,6 +6,7 @@
 package archive
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -45,6 +46,17 @@ func (s *Service) HandoffForSubtask(task store.Task, sub store.Subtask) error {
 	fmt.Fprintf(&b, "| 状态 | %s |\n", sub.Status)
 	fmt.Fprintf(&b, "| 开始 → 结束 | %s → %s |\n", sub.StartedAt, sub.FinishedAt)
 	fmt.Fprintf(&b, "| 产物指纹 | `%s` |\n\n", sub.Fingerprint)
+	// 验收标准清单（§2.2 acceptance_criteria：随交接文档留痕）
+	if task.Acceptance != "" && task.Acceptance != "[]" {
+		var items []string
+		if json.Unmarshal([]byte(task.Acceptance), &items) == nil && len(items) > 0 {
+			b.WriteString("## 验收标准\n\n")
+			for _, it := range items {
+				fmt.Fprintf(&b, "- [ ] %s\n", it)
+			}
+			b.WriteString("\n")
+		}
+	}
 	b.WriteString("## 二、执行结果\n\n```json\n")
 	b.WriteString(sub.Result)
 	b.WriteString("\n```\n\n")

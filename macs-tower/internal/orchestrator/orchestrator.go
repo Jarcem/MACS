@@ -168,13 +168,17 @@ func (o *Orchestrator) Submit(goal string) (store.Task, error) {
 	return o.SubmitPlan(TaskRequest{Goal: goal})
 }
 
-// TaskRequest POST /api/v1/tasks 请求体（V3.0 扩展：agent_platform / budget）
+// TaskRequest POST /api/v1/tasks 请求体（V3.0 扩展：agent_platform / budget / 验收标准 §2.2）
 type TaskRequest struct {
 	Goal          string     `json:"goal"`
 	Title         string     `json:"title,omitempty"`
 	Plan          []PlanStep `json:"plan,omitempty"`
 	BudgetCents   float64    `json:"budget_cents,omitempty"`
 	AgentPlatform string     `json:"agent_platform,omitempty"`
+	Priority      string     `json:"priority,omitempty"`
+	Acceptance    []string   `json:"acceptance_criteria,omitempty"` // 验收项（AI 拟稿 + 人工确认，§4.2）
+	AcceptNote    string     `json:"acceptance_design_note,omitempty"`
+	DeadlineAt    string     `json:"deadline_at,omitempty"`
 }
 
 // SubmitPlan 提交任务：plan 为空时走内置拆解；否则按 plan 建子任务 DAG
@@ -189,9 +193,21 @@ func (o *Orchestrator) SubmitPlan(req TaskRequest) (store.Task, error) {
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	priority := strings.TrimSpace(req.Priority)
+	if priority == "" {
+		priority = "normal"
+	}
+	acceptance := "[]"
+	if len(req.Acceptance) > 0 {
+		if b, err := json.Marshal(req.Acceptance); err == nil {
+			acceptance = string(b)
+		}
+	}
 	task := store.Task{
 		ID: store.NewID(), Goal: goal, Title: strings.TrimSpace(req.Title),
-		Status: "pending", Progress: 0, BudgetCents: req.BudgetCents,
+		Status: "pending", Progress: 0, Priority: priority,
+		Acceptance: acceptance, AcceptNote: strings.TrimSpace(req.AcceptNote),
+		DeadlineAt: strings.TrimSpace(req.DeadlineAt), BudgetCents: req.BudgetCents,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	var subs []store.Subtask

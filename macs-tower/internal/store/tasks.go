@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -24,9 +25,23 @@ type Task struct {
 	Title       string `json:"title"`
 	Status      string `json:"status"`
 	Progress    int    `json:"progress"`
+	Priority    string `json:"priority"`
+	Acceptance  string `json:"acceptance_criteria"`  // JSON 数组：验收项（§2.2）
+	AcceptNote  string `json:"acceptance_design_note"`
+	DeadlineAt  string `json:"deadline_at"`
 	BudgetCents float64 `json:"budget_cents"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
+}
+
+// taskCols 任务列清单（新增列追加尾部，向前兼容；与 scanTask 一一对应）
+const taskCols = `id,goal,title,status,progress,priority,acceptance_criteria,acceptance_design_note,COALESCE(deadline_at,''),budget_cents,created_at,updated_at`
+
+func scanTask(rows interface{ Scan(...any) error }) (Task, error) {
+	var t Task
+	err := rows.Scan(&t.ID, &t.Goal, &t.Title, &t.Status, &t.Progress, &t.Priority, &t.Acceptance,
+		&t.AcceptNote, &t.DeadlineAt, &t.BudgetCents, &t.CreatedAt, &t.UpdatedAt)
+	return t, err
 }
 
 type Subtask struct {
@@ -79,8 +94,10 @@ func (s *Store) InsertTaskWithSubtasks(t Task, subs []Subtask) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO tasks(id,goal,title,status,progress,budget_cents,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-		t.ID, t.Goal, t.Title, t.Status, t.Progress, t.BudgetCents, t.CreatedAt, t.UpdatedAt); err != nil {
+	if _, err := tx.Exec(`INSERT INTO tasks(id,goal,title,status,progress,priority,acceptance_criteria,acceptance_design_note,deadline_at,budget_cents,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Goal, t.Title, t.Status, t.Progress, t.Priority, t.Acceptance, t.AcceptNote, t.DeadlineAt,
+		t.BudgetCents, t.CreatedAt, t.UpdatedAt); err != nil {
 		return err
 	}
 	stmt, err := tx.Prepare(`INSERT INTO subtasks(id,task_id,seq,title,payload,depends_on,status,kind,review_of,attempt_count,
@@ -136,7 +153,7 @@ func (s *Store) ListTasksFiltered(q TaskQuery) ([]Task, int, error) {
 	if q.Offset < 0 {
 		q.Offset = 0
 	}
-	rows, err := s.db.Query(`SELECT id,goal,title,status,progress,budget_cents,created_at,updated_at FROM tasks `+
+	rows, err := s.db.Query(`SELECT `+taskCols+` FROM tasks `+
 		where+` ORDER BY `+sortCol+` LIMIT ? OFFSET ?`, append(args, q.Limit, q.Offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -144,8 +161,8 @@ func (s *Store) ListTasksFiltered(q TaskQuery) ([]Task, int, error) {
 	defer rows.Close()
 	out := []Task{}
 	for rows.Next() {
-		var t Task
-		if err := rows.Scan(&t.ID, &t.Goal, &t.Title, &t.Status, &t.Progress, &t.BudgetCents, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		t, err := scanTask(rows)
+		if err != nil {
 			return nil, 0, err
 		}
 		out = append(out, t)
@@ -177,10 +194,8 @@ func (s *Store) ListTasks(limit int) ([]Task, error) {
 }
 
 func (s *Store) GetTask(id string) (Task, error) {
-	var t Task
-	err := s.db.QueryRow(`SELECT id,goal,title,status,progress,budget_cents,created_at,updated_at FROM tasks WHERE id=?`, id).
-		Scan(&t.ID, &t.Goal, &t.Title, &t.Status, &t.Progress, &t.BudgetCents, &t.CreatedAt, &t.UpdatedAt)
-	return t, err
+	row := s.db.QueryRow(`SELECT `+taskCols+` FROM tasks WHERE id=?`, id)
+	return scanTask(row)
 }
 
 // SetTaskStatus 直接推进任务状态（blocked/cancelled 等非聚合态）
@@ -332,14 +347,18 @@ func (s *Store) CountRunning() (map[string]int, error) {
 }
 
 // RecomputeTask 按子任务终态汇总任务状态与进度（进度可推导：不靠 Worker 自报百分比）
+// 进度合成公式（UI 设计 §16.1，wᵢ=1）：completed=1 / self_checking·review_pending·reviewing=0.9 /
+// in_spot_check=1（复核已过）/ 其余=0；无 telemetry 细粒度数据时即「按完成数」诚实口径的加权细化。
 // failed 聚合：存在失败且无待执行余量 → partial_failure（附录 B.4）；仍有可重试/待执行 → running
 func (s *Store) RecomputeTask(taskID string) (Task, error) {
 	var total, done, failed, pending int
+	var nearDone float64 // self_checking/review_pending/reviewing/in_spot_check 加权 0.9（in_spot_check 按复核已过计 1）
 	err := s.db.QueryRow(`SELECT COUNT(1),
 		COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status IN ('pending','ready','dispatched','running','self_checking','review_pending','reviewing','in_spot_check') THEN 1 ELSE 0 END),0)
-		FROM subtasks WHERE task_id=?`, taskID).Scan(&total, &done, &failed, &pending)
+		COALESCE(SUM(CASE WHEN status IN ('pending','ready','dispatched','running','frozen','cancelled') THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status IN ('self_checking','review_pending','reviewing') THEN 0.9 WHEN status='in_spot_check' THEN 1 ELSE 0 END),0)
+		FROM subtasks WHERE task_id=?`, taskID).Scan(&total, &done, &failed, &pending, &nearDone)
 	if err != nil {
 		return Task{}, err
 	}
@@ -358,7 +377,8 @@ func (s *Store) RecomputeTask(taskID string) (Task, error) {
 		status = "partial_failure"
 	}
 	if total > 0 {
-		progress = done * 100 / total
+		// §16.1 加权合成：round(100 × Σ(wᵢ·pᵢ) / Σwᵢ)，wᵢ=1
+		progress = int(math.Round(100 * (float64(done) + nearDone) / float64(total)))
 	}
 
 	// blocked/cancelled 由审批/取消语义显式管理，聚合不覆盖

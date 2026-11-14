@@ -486,6 +486,16 @@ func main() {
 		}
 		wj(w, map[string]any{"data": list})
 	})
+	// UI 设计 16.2：归档查询走 /api/v1/archives（与 /documents 同一处理器别名）
+	mux.HandleFunc("GET /api/v1/archives", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		list, err := st.ListArchiveDocs(q.Get("task_id"), q.Get("doc_type"), 100)
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
+	})
 	mux.HandleFunc("GET /api/v1/documents/{id}", func(w http.ResponseWriter, r *http.Request) {
 		doc, err := st.GetArchiveDoc(r.PathValue("id"))
 		if err != nil {

@@ -4,11 +4,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type Incubator, type DispatchRow, type PlanStep, type Task, type Approval, type SpotCheck, type ArchiveDoc, type CostSummary, type AgentPlatform, type CommandTerminal } from './api';
 
+// 状态色语义（UI 设计 8.2：绿=成功 / 蓝=进行中 / 灰=中性 / 琥珀=警告 / 红=失败）
 const statusClass = (s: string) => {
-  if (['online', 'acked', 'running', 'reviewing', 'in_spot_check', 'overloaded'].includes(s)) return 'hud-running';
-  if (['completed', 'passed', 'approved', 'ready'].includes(s)) return 'hud-completed';
-  if (['dispatched', 'review_pending', 'self_checking', 'spot_check_passed', 'registered'].includes(s)) return 'hud-checking';
-  if (['offline', 'timeout', 'failed', 'rejected', 'blocked', 'frozen', 'revoked'].includes(s)) return 'hud-failed';
+  if (['online', 'acked', 'running', 'reviewing', 'in_spot_check'].includes(s)) return 'hud-running';
+  if (['completed', 'passed', 'approved', 'ready', 'spot_check_passed'].includes(s)) return 'hud-completed';
+  if (['dispatched', 'review_pending', 'self_checking', 'registered'].includes(s)) return 'hud-checking';
+  if (['overloaded', 'retransmitted', 'partial_failure', 'timeout'].includes(s)) return 'hud-warn';
+  if (['offline', 'failed', 'rejected', 'blocked', 'frozen', 'revoked', 'unreachable'].includes(s)) return 'hud-failed';
   return 'hud-pending';
 };
 
