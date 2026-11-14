@@ -33,6 +33,7 @@ const (
 	MsgCmdHeartbeat    = "cmd_heartbeat"  // V3.5 §6.4.14
 	// 下行：调度塔 → 孵化器/命令终端
 	MsgDispatch            = "dispatch"
+	MsgDispatchCommit      = "dispatch_commit" // 6.4.3：广播承接锁定通知（其余候选停止应答、不孵化）
 	MsgWorkerSpawn         = "worker_spawn"
 	MsgWorkerRollback      = "worker_rollback"
 	MsgBudgetChanged       = "budget_changed"

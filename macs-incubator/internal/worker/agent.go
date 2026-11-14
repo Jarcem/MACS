@@ -106,7 +106,7 @@ func depsSummary(deps []Dep) string {
 }
 
 // runCLI 以 argv 方式启动本机 Agent 终端，等待退出并回传退出码与截断输出
-func runCLI(j Job) Outcome {
+func runCLI(ctx context.Context, j Job) Outcome {
 	if os.Getenv("MACS_ALLOW_CLI_AGENT") != "1" {
 		return fail("cli_agent disabled on incubator: set MACS_ALLOW_CLI_AGENT=1")
 	}
@@ -119,14 +119,14 @@ func runCLI(j Job) Outcome {
 	}
 
 	timeout := timeoutOf(j.TimeoutMs)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	args := make([]string, 0, len(j.Args))
 	for _, a := range j.Args {
 		args = append(args, expand(a, j))
 	}
-	cmd := exec.CommandContext(ctx, command, args...)
+	cmd := exec.CommandContext(runCtx, command, args...)
 	if j.Cwd != "" {
 		cmd.Dir = j.Cwd
 	}
@@ -146,7 +146,9 @@ func runCLI(j Job) Outcome {
 
 	out := Outcome{}
 	switch {
-	case ctx.Err() == context.DeadlineExceeded:
+	case ctx.Err() != nil:
+		return Outcome{} // 回滚：不产出结果
+	case runCtx.Err() == context.DeadlineExceeded:
 		out.Status = "failed"
 		out.Error = fmt.Sprintf("cli_agent: timeout after %s", timeout)
 	case runErr != nil:
@@ -165,7 +167,7 @@ func runCLI(j Job) Outcome {
 }
 
 // runHTTP 调用本机/局域网 Agent 的 HTTP 接口；2xx 视为完成
-func runHTTP(j Job) Outcome {
+func runHTTP(ctx context.Context, j Job) Outcome {
 	raw := strings.TrimSpace(j.URL)
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
@@ -176,7 +178,7 @@ func runHTTP(j Job) Outcome {
 		method = http.MethodPost
 	}
 	body := expand(j.Body, j)
-	req, err := http.NewRequest(method, raw, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, raw, strings.NewReader(body))
 	if err != nil {
 		return fail("http_agent: %v", err)
 	}
@@ -192,6 +194,9 @@ func runHTTP(j Job) Outcome {
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return Outcome{} // 回滚
+		}
 		return fail("http_agent: %v", err)
 	}
 	defer resp.Body.Close()

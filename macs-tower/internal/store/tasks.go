@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 // NewID 生成 16 位十六进制 id（任务/子任务）
@@ -18,30 +19,57 @@ func NewID() string {
 }
 
 type Task struct {
-	ID        string `json:"id"`
-	Goal      string `json:"goal"`
-	Status    string `json:"status"`
-	Progress  int    `json:"progress"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID          string `json:"id"`
+	Goal        string `json:"goal"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	Progress    int    `json:"progress"`
+	BudgetCents float64 `json:"budget_cents"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 type Subtask struct {
-	ID          string `json:"id"`
-	TaskID      string `json:"task_id"`
-	Seq         int    `json:"seq"`
-	Title       string `json:"title"`
-	Payload     string `json:"payload"`
-	DependsOn   string `json:"depends_on"`
-	Status      string `json:"status"`
-	IncubatorID string `json:"incubator_id"`
-	WorkerID    string `json:"worker_id"`
-	Result      string `json:"result"`
-	Error       string `json:"error"`
-	CreatedAt   string `json:"created_at"`
-	StartedAt   string `json:"started_at"`
-	FinishedAt  string `json:"finished_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ID             string `json:"id"`
+	TaskID         string `json:"task_id"`
+	Seq            int    `json:"seq"`
+	Title          string `json:"title"`
+	Payload        string `json:"payload"`
+	DependsOn      string `json:"depends_on"`
+	Status         string `json:"status"`
+	IncubatorID    string `json:"incubator_id"`
+	WorkerID       string `json:"worker_id"`
+	Result         string `json:"result"`
+	Error          string `json:"error"`
+	Kind           string `json:"kind"`
+	ReviewOf       string `json:"review_of"`
+	AttemptCount   int    `json:"attempt_count"`
+	MaxRetries     int    `json:"max_retries"`
+	NextRetryAt    string `json:"next_retry_at"`
+	Round          int    `json:"review_round"`
+	QualityStatus  string `json:"quality_status"`
+	Fingerprint    string `json:"fingerprint"`
+	TemplateID     string `json:"template_id"`
+	RequiredDriver string `json:"required_driver"`
+	CreatedAt      string `json:"created_at"`
+	StartedAt      string `json:"started_at"`
+	FinishedAt     string `json:"finished_at"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+// subtaskCols 子任务列清单与扫描顺序一一对应（新增列追加在尾部，向前兼容）
+const subtaskCols = `id,task_id,seq,title,payload,depends_on,status,incubator_id,worker_id,result,error,
+	kind,review_of,attempt_count,max_retries,next_retry_at,review_round,quality_status,fingerprint,template_id,required_driver,
+	created_at,COALESCE(started_at,''),COALESCE(finished_at,''),updated_at`
+
+func scanSubtask(rows interface{ Scan(...any) error }) (Subtask, error) {
+	var x Subtask
+	err := rows.Scan(&x.ID, &x.TaskID, &x.Seq, &x.Title, &x.Payload, &x.DependsOn, &x.Status,
+		&x.IncubatorID, &x.WorkerID, &x.Result, &x.Error,
+		&x.Kind, &x.ReviewOf, &x.AttemptCount, &x.MaxRetries, &x.NextRetryAt, &x.Round, &x.QualityStatus,
+		&x.Fingerprint, &x.TemplateID, &x.RequiredDriver,
+		&x.CreatedAt, &x.StartedAt, &x.FinishedAt, &x.UpdatedAt)
+	return x, err
 }
 
 // InsertTaskWithSubtasks 一个事务内落任务与其子任务
@@ -51,65 +79,126 @@ func (s *Store) InsertTaskWithSubtasks(t Task, subs []Subtask) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO tasks(id,goal,status,progress,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
-		t.ID, t.Goal, t.Status, t.Progress, t.CreatedAt, t.UpdatedAt); err != nil {
+	if _, err := tx.Exec(`INSERT INTO tasks(id,goal,title,status,progress,budget_cents,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		t.ID, t.Goal, t.Title, t.Status, t.Progress, t.BudgetCents, t.CreatedAt, t.UpdatedAt); err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT INTO subtasks(id,task_id,seq,title,payload,depends_on,status,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)`)
+	stmt, err := tx.Prepare(`INSERT INTO subtasks(id,task_id,seq,title,payload,depends_on,status,kind,review_of,attempt_count,
+		max_retries,review_round,quality_status,fingerprint,template_id,required_driver,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 	for _, sub := range subs {
 		if _, err := stmt.Exec(sub.ID, sub.TaskID, sub.Seq, sub.Title, sub.Payload, sub.DependsOn,
-			sub.Status, sub.CreatedAt, sub.UpdatedAt); err != nil {
+			sub.Status, sub.Kind, sub.ReviewOf, sub.AttemptCount, sub.MaxRetries, sub.Round,
+			sub.QualityStatus, sub.Fingerprint, sub.TemplateID, sub.RequiredDriver, sub.CreatedAt, sub.UpdatedAt); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func (s *Store) ListTasks(limit int) ([]Task, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+// ListTasksFiltered V3.3 查询参数：status 多值 / from / to / q 标题模糊 / 分页 / 排序
+func (s *Store) ListTasksFiltered(q TaskQuery) ([]Task, int, error) {
+	where := "WHERE 1=1"
+	args := []any{}
+	if len(q.Statuses) > 0 {
+		where += ` AND status IN (` + placeholders(len(q.Statuses)) + `)`
+		for _, st := range q.Statuses {
+			args = append(args, st)
+		}
 	}
-	rows, err := s.db.Query(`SELECT id,goal,status,progress,created_at,updated_at FROM tasks ORDER BY created_at DESC LIMIT ?`, limit)
+	if q.From != "" {
+		where += ` AND created_at >= ?`
+		args = append(args, q.From)
+	}
+	if q.To != "" {
+		where += ` AND created_at <= ?`
+		args = append(args, q.To)
+	}
+	if q.Q != "" {
+		where += ` AND (goal LIKE ? OR title LIKE ?)`
+		args = append(args, "%"+q.Q+"%", "%"+q.Q+"%")
+	}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM tasks `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	sortCol := "updated_at DESC"
+	if q.Sort == "created_at" {
+		sortCol = "created_at DESC"
+	}
+	if q.Limit <= 0 || q.Limit > 200 {
+		q.Limit = 50
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+	rows, err := s.db.Query(`SELECT id,goal,title,status,progress,budget_cents,created_at,updated_at FROM tasks `+
+		where+` ORDER BY `+sortCol+` LIMIT ? OFFSET ?`, append(args, q.Limit, q.Offset)...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []Task{}
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.Goal, &t.Status, &t.Progress, &t.CreatedAt, &t.UpdatedAt); err != nil {
-			return nil, err
+		if err := rows.Scan(&t.ID, &t.Goal, &t.Title, &t.Status, &t.Progress, &t.BudgetCents, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, 0, err
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
+}
+
+// placeholders 生成 n 个 '?' 占位符（SQLite/PG 双兼容）
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// TaskQuery 任务列表过滤条件（附录 B.1 V3.3）
+type TaskQuery struct {
+	Statuses []string
+	From, To string
+	Q        string
+	Limit    int
+	Offset   int
+	Sort     string
+}
+
+func (s *Store) ListTasks(limit int) ([]Task, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	ts, _, err := s.ListTasksFiltered(TaskQuery{Limit: limit})
+	return ts, err
 }
 
 func (s *Store) GetTask(id string) (Task, error) {
 	var t Task
-	err := s.db.QueryRow(`SELECT id,goal,status,progress,created_at,updated_at FROM tasks WHERE id=?`, id).
-		Scan(&t.ID, &t.Goal, &t.Status, &t.Progress, &t.CreatedAt, &t.UpdatedAt)
+	err := s.db.QueryRow(`SELECT id,goal,title,status,progress,budget_cents,created_at,updated_at FROM tasks WHERE id=?`, id).
+		Scan(&t.ID, &t.Goal, &t.Title, &t.Status, &t.Progress, &t.BudgetCents, &t.CreatedAt, &t.UpdatedAt)
 	return t, err
 }
 
+// SetTaskStatus 直接推进任务状态（blocked/cancelled 等非聚合态）
+func (s *Store) SetTaskStatus(id, status string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET status=?, updated_at=? WHERE id=?`, status, now(), id)
+	return err
+}
+
 func (s *Store) ListSubtasks(taskID string) ([]Subtask, error) {
-	rows, err := s.db.Query(`SELECT id,task_id,seq,title,payload,depends_on,status,incubator_id,worker_id,result,error,
-		created_at,COALESCE(started_at,''),COALESCE(finished_at,''),updated_at
-		FROM subtasks WHERE task_id=? ORDER BY seq`, taskID)
+	rows, err := s.db.Query(`SELECT `+subtaskCols+` FROM subtasks WHERE task_id=? ORDER BY seq`, taskID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []Subtask{}
 	for rows.Next() {
-		var x Subtask
-		if err := rows.Scan(&x.ID, &x.TaskID, &x.Seq, &x.Title, &x.Payload, &x.DependsOn, &x.Status,
-			&x.IncubatorID, &x.WorkerID, &x.Result, &x.Error, &x.CreatedAt, &x.StartedAt, &x.FinishedAt, &x.UpdatedAt); err != nil {
+		x, err := scanSubtask(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -118,18 +207,13 @@ func (s *Store) ListSubtasks(taskID string) ([]Subtask, error) {
 }
 
 func (s *Store) GetSubtask(id string) (Subtask, error) {
-	var x Subtask
-	err := s.db.QueryRow(`SELECT id,task_id,seq,title,payload,depends_on,status,incubator_id,worker_id,result,error,
-		created_at,COALESCE(started_at,''),COALESCE(finished_at,''),updated_at
-		FROM subtasks WHERE id=?`, id).
-		Scan(&x.ID, &x.TaskID, &x.Seq, &x.Title, &x.Payload, &x.DependsOn, &x.Status,
-			&x.IncubatorID, &x.WorkerID, &x.Result, &x.Error, &x.CreatedAt, &x.StartedAt, &x.FinishedAt, &x.UpdatedAt)
-	return x, err
+	row := s.db.QueryRow(`SELECT `+subtaskCols+` FROM subtasks WHERE id=?`, id)
+	return scanSubtask(row)
 }
 
-// ClaimSubtask 抢占分发：仅 pending 可被抢占，避免重复下发
+// ClaimSubtask 抢占分发：仅 pending 可被抢占，避免重复下发；同时登记执行次数
 func (s *Store) ClaimSubtask(id, incubatorID string) error {
-	res, err := s.db.Exec(`UPDATE subtasks SET status='dispatched', incubator_id=?, updated_at=? WHERE id=? AND status='pending'`,
+	res, err := s.db.Exec(`UPDATE subtasks SET status='dispatched', incubator_id=?, attempt_count=attempt_count+1, updated_at=? WHERE id=? AND status='pending'`,
 		incubatorID, now(), id)
 	if err != nil {
 		return err
@@ -140,11 +224,90 @@ func (s *Store) ClaimSubtask(id, incubatorID string) error {
 	return nil
 }
 
-// FinishSubtask 终态落库（completed/failed），同时记录执行者与开始时间
-func (s *Store) FinishSubtask(id, status, result, errMsg, workerID, startedAt string) error {
-	_, err := s.db.Exec(`UPDATE subtasks SET status=?, result=?, error=?, worker_id=?,
+// FinishSubtask 终态落库（completed/failed），同时记录执行者、开始时间与产物指纹
+func (s *Store) FinishSubtask(id, status, result, errMsg, workerID, startedAt, fingerprint string) error {
+	_, err := s.db.Exec(`UPDATE subtasks SET status=?, result=?, error=?, worker_id=?, fingerprint=?,
 		started_at=COALESCE(NULLIF(?,''), started_at), finished_at=?, updated_at=? WHERE id=?`,
-		status, result, errMsg, workerID, startedAt, now(), now(), id)
+		status, result, errMsg, workerID, fingerprint, startedAt, now(), now(), id)
+	return err
+}
+
+// SetSubtaskStatus 质量管线中间态推进（review_pending/reviewing/in_spot_check 等），附合法性校验由调用方负责
+func (s *Store) SetSubtaskStatus(id, status, quality string) error {
+	_, err := s.db.Exec(`UPDATE subtasks SET status=?, quality_status=?, updated_at=? WHERE id=?`,
+		status, quality, now(), id)
+	return err
+}
+
+// SetSubtaskRetry E01 失败重试登记：累计次数 + 退避到期时刻
+func (s *Store) SetSubtaskRetry(id string, attempt, maxRetries int, nextRetryAt string) error {
+	_, err := s.db.Exec(`UPDATE subtasks SET attempt_count=?, max_retries=?, next_retry_at=?, updated_at=? WHERE id=?`,
+		attempt, maxRetries, nextRetryAt, now(), id)
+	return err
+}
+
+// RequeueRetryable 将退避到期且仍有重试额度的失败子任务重新置为 pending（E01）
+func (s *Store) RequeueRetryable() (int64, error) {
+	res, err := s.db.Exec(`UPDATE subtasks SET status='pending', next_retry_at='', updated_at=?
+		WHERE status='failed' AND attempt_count < max_retries AND next_retry_at <> '' AND next_retry_at <= ?`,
+		now(), now())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ListStaleRunning Worker 超时清理（6.5）：dispatched/running 超过 TTL 的子任务
+func (s *Store) ListStaleRunning(ttlBefore string) ([]Subtask, error) {
+	rows, err := s.db.Query(`SELECT `+subtaskCols+` FROM subtasks
+		WHERE status IN ('dispatched','running') AND started_at <> '' AND started_at < ?`, ttlBefore)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Subtask{}
+	for rows.Next() {
+		x, err := scanSubtask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// ListSubtasksByReviewOf 复核幂等护栏：同一原子任务的未完结复核子任务
+func (s *Store) ListSubtasksByReviewOf(id string) ([]Subtask, error) {
+	rows, err := s.db.Query(`SELECT `+subtaskCols+` FROM subtasks WHERE review_of=? ORDER BY seq`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Subtask{}
+	for rows.Next() {
+		x, err := scanSubtask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// InsertSubtaskStandalone 质量管线追加子任务（复核/抽查补挂，任务事务外单条落库）
+func (s *Store) InsertSubtaskStandalone(sub Subtask) error {
+	_, err := s.db.Exec(`INSERT INTO subtasks(id,task_id,seq,title,payload,depends_on,status,kind,review_of,attempt_count,
+		max_retries,review_round,quality_status,fingerprint,template_id,required_driver,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		sub.ID, sub.TaskID, sub.Seq, sub.Title, sub.Payload, sub.DependsOn, sub.Status, sub.Kind, sub.ReviewOf,
+		sub.AttemptCount, sub.MaxRetries, sub.Round, sub.QualityStatus, sub.Fingerprint, sub.TemplateID,
+		sub.RequiredDriver, sub.CreatedAt, sub.UpdatedAt)
+	return err
+}
+
+// SetSubtaskReviewRound E04 复核打回轮次推进
+func (s *Store) SetSubtaskReviewRound(id string, round int) error {
+	_, err := s.db.Exec(`UPDATE subtasks SET review_round=?, updated_at=? WHERE id=?`, round, now(), id)
 	return err
 }
 
@@ -168,13 +331,15 @@ func (s *Store) CountRunning() (map[string]int, error) {
 	return out, rows.Err()
 }
 
-// RecomputeTask 按子任务终态汇总任务状态与进度
+// RecomputeTask 按子任务终态汇总任务状态与进度（进度可推导：不靠 Worker 自报百分比）
+// failed 聚合：存在失败且无待执行余量 → partial_failure（附录 B.4）；仍有可重试/待执行 → running
 func (s *Store) RecomputeTask(taskID string) (Task, error) {
-	var total, done, failed int
+	var total, done, failed, pending int
 	err := s.db.QueryRow(`SELECT COUNT(1),
 		COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0)
-		FROM subtasks WHERE task_id=?`, taskID).Scan(&total, &done, &failed)
+		COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status IN ('pending','ready','dispatched','running','self_checking','review_pending','reviewing','in_spot_check') THEN 1 ELSE 0 END),0)
+		FROM subtasks WHERE task_id=?`, taskID).Scan(&total, &done, &failed, &pending)
 	if err != nil {
 		return Task{}, err
 	}
@@ -183,17 +348,26 @@ func (s *Store) RecomputeTask(taskID string) (Task, error) {
 	progress := 0
 	switch {
 	case total == 0:
-	case failed > 0:
-		status = "failed"
+	case pending > 0:
+		status = "running"
 	case done == total:
 		status = "completed"
-	default:
-		status = "running"
+	case failed == total:
+		status = "failed"
+	case failed > 0:
+		status = "partial_failure"
 	}
 	if total > 0 {
 		progress = done * 100 / total
 	}
 
+	// blocked/cancelled 由审批/取消语义显式管理，聚合不覆盖
+	if cur, _ := s.GetTask(taskID); cur.Status == "blocked" || cur.Status == "cancelled" {
+		if status == "completed" || status == "partial_failure" {
+			_, _ = s.db.Exec(`UPDATE tasks SET status=?, progress=?, updated_at=? WHERE id=?`, status, progress, now(), taskID)
+		}
+		return cur, nil
+	}
 	_, err = s.db.Exec(`UPDATE tasks SET status=?, progress=?, updated_at=? WHERE id=?`, status, progress, now(), taskID)
 	if err != nil {
 		return Task{}, err
@@ -201,20 +375,17 @@ func (s *Store) RecomputeTask(taskID string) (Task, error) {
 	return s.GetTask(taskID)
 }
 
-// ListReadySubtasks 待分发且依赖已满足的子任务（跨任务）
+// ListReadySubtasks 待分发且依赖已满足的子任务（跨任务，含复核子任务）
 func (s *Store) ListReadySubtasks() ([]Subtask, error) {
-	rows, err := s.db.Query(`SELECT id,task_id,seq,title,payload,depends_on,status,incubator_id,worker_id,result,error,
-		created_at,COALESCE(started_at,''),COALESCE(finished_at,'' ),updated_at
-		FROM subtasks WHERE status='pending' ORDER BY task_id, seq`)
+	rows, err := s.db.Query(`SELECT `+subtaskCols+` FROM subtasks WHERE status='pending' ORDER BY task_id, seq`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []Subtask{}
 	for rows.Next() {
-		var x Subtask
-		if err := rows.Scan(&x.ID, &x.TaskID, &x.Seq, &x.Title, &x.Payload, &x.DependsOn, &x.Status,
-			&x.IncubatorID, &x.WorkerID, &x.Result, &x.Error, &x.CreatedAt, &x.StartedAt, &x.FinishedAt, &x.UpdatedAt); err != nil {
+		x, err := scanSubtask(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, x)

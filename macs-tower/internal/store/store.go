@@ -17,6 +17,12 @@ import (
 
 type Store struct{ db *sql.DB }
 
+// Close 释放连接（测试与优雅退出用）
+func (s *Store) Close() error { return s.db.Close() }
+
+// Exec 暴露底层执行（测试 DDL 装配用）
+func (s *Store) Exec(query string, args ...any) (sql.Result, error) { return s.db.Exec(query, args...) }
+
 type Incubator struct {
 	ID, Name, Status string
 	Capacity         int
@@ -26,6 +32,9 @@ type Incubator struct {
 	LastIP           string
 	LastHeartbeat    string
 	RegisteredAt     string
+	ActiveWorkers    int
+	LastLoad         float64
+	Tags             string
 }
 
 func Open(path string) (*Store, error) {
@@ -74,6 +83,9 @@ func (s *Store) Migrate(dir string) error {
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
 
+// sqlNoRows 包内别名（unified.go / quality.go 幂等 upsert 判定用）
+func sqlNoRows() error { return sql.ErrNoRows }
+
 // UpsertIncubator Q1 幂等：同名注册视为心跳刷新，更新配置并返回既有 id
 func (s *Store) UpsertIncubator(i Incubator) (string, error) {
 	var id string
@@ -97,15 +109,27 @@ func (s *Store) TouchIncubator(id string) {
 	_, _ = s.db.Exec(`UPDATE incubators SET last_heartbeat=?, status='online' WHERE id=?`, now(), id)
 }
 
+// TouchWithLoad 心跳刷新 + 资源画像（6.4.3 handleReport：capacity/load 落库供负载均衡评分）
+func (s *Store) TouchWithLoad(id string, capacity int, activeWorkers int, load float64) {
+	_, _ = s.db.Exec(`UPDATE incubators SET last_heartbeat=?, status='online', capacity=?, active_workers=?, last_load=? WHERE id=?`,
+		now(), capacity, activeWorkers, load, id)
+}
+
 func (s *Store) MarkStaleOffline(staleBefore time.Time) {
-	_, _ = s.db.Exec(`UPDATE incubators SET status='offline' WHERE last_heartbeat < ? AND status='online'`,
+	_, _ = s.db.Exec(`UPDATE incubators SET status='offline' WHERE last_heartbeat < ? AND status IN ('online','overloaded')`,
 		staleBefore.UTC().Format(time.RFC3339))
 }
 
+// SetIncubatorStatus 再平衡（6.4.7 rebalanceTick）：overloaded ↔ online
+func (s *Store) SetIncubatorStatus(id, status string) {
+	_, _ = s.db.Exec(`UPDATE incubators SET status=? WHERE id=?`, status, id)
+}
+
 func (s *Store) ListIncubators(onlineOnly bool) ([]Incubator, error) {
-	q := `SELECT id,name,status,capacity,platforms,drivers,listen_port,last_ip,COALESCE(last_heartbeat,''),registered_at FROM incubators`
+	q := `SELECT id,name,status,capacity,platforms,drivers,listen_port,last_ip,COALESCE(last_heartbeat,''),registered_at,
+		active_workers,last_load,tags FROM incubators`
 	if onlineOnly {
-		q += ` WHERE status='online'`
+		q += ` WHERE status IN ('online','overloaded')`
 	}
 	rows, err := s.db.Query(q)
 	if err != nil {
@@ -115,7 +139,8 @@ func (s *Store) ListIncubators(onlineOnly bool) ([]Incubator, error) {
 	var out []Incubator
 	for rows.Next() {
 		var i Incubator
-		if err := rows.Scan(&i.ID, &i.Name, &i.Status, &i.Capacity, &i.Platforms, &i.Drivers, &i.ListenPort, &i.LastIP, &i.LastHeartbeat, &i.RegisteredAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.Name, &i.Status, &i.Capacity, &i.Platforms, &i.Drivers, &i.ListenPort, &i.LastIP,
+			&i.LastHeartbeat, &i.RegisteredAt, &i.ActiveWorkers, &i.LastLoad, &i.Tags); err != nil {
 			return nil, err
 		}
 		out = append(out, i)
@@ -123,10 +148,27 @@ func (s *Store) ListIncubators(onlineOnly bool) ([]Incubator, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) InsertDispatchLog(id, subtaskID, incubatorID, msgID string) error {
-	_, err := s.db.Exec(`INSERT INTO dispatch_log(id,subtask_id,incubator_id,msg_id,ack_status,dispatched_at) VALUES(?,?,?,?,'pending',?)`,
-		id, subtaskID, incubatorID, msgID, now())
+func (s *Store) GetIncubator(id string) (Incubator, error) {
+	var i Incubator
+	err := s.db.QueryRow(`SELECT id,name,status,capacity,platforms,drivers,listen_port,last_ip,COALESCE(last_heartbeat,''),registered_at,
+		active_workers,last_load,tags FROM incubators WHERE id=?`, id).
+		Scan(&i.ID, &i.Name, &i.Status, &i.Capacity, &i.Platforms, &i.Drivers, &i.ListenPort, &i.LastIP,
+			&i.LastHeartbeat, &i.RegisteredAt, &i.ActiveWorkers, &i.LastLoad, &i.Tags)
+	return i, err
+}
+
+// InsertDispatchLog 6.4.8：每次下发一行（重传更新同一行，msg_id 唯一）
+func (s *Store) InsertDispatchLog(id, subtaskID, incubatorID, msgID, mode string) error {
+	ts := now()
+	_, err := s.db.Exec(`INSERT INTO dispatch_log(id,subtask_id,incubator_id,msg_id,ack_status,dispatched_at,last_sent_at,attempt_count,dispatch_mode)
+		VALUES(?,?,?,?,'pending',?,?,1,?)`, id, subtaskID, incubatorID, msgID, ts, ts, mode)
 	return err
+}
+
+// BumpDispatchRetransmit 重传登记（固定退避 200/500/1000ms，最多 3 次）
+func (s *Store) BumpDispatchRetransmit(msgID string) {
+	_, _ = s.db.Exec(`UPDATE dispatch_log SET attempt_count=attempt_count+1, last_sent_at=?, ack_status='retransmitted' WHERE msg_id=?`,
+		now(), msgID)
 }
 
 func (s *Store) SetDispatchAck(msgID, status string) {

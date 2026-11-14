@@ -18,6 +18,8 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +27,7 @@ import (
 
 var (
 	port        = env("MACS_CMDTERM_PORT", "8472")
+	portNum, _  = strconv.Atoi(port)
 	towerAddr   = env("MACS_TOWER_HOST", "127.0.0.1") + ":" + env("MACS_TOWER_PORT", "8470")
 	secret      = os.Getenv("MACS_CMDTERM_SECRET") // 缺省拒绝一切指令
 	terminalID  = env("MACS_CMDTERM_ID", fmt.Sprintf("%d", time.Now().UnixNano()))
@@ -51,10 +54,11 @@ func buildAllow(list string) []*regexp.Regexp {
 }
 
 type envelope struct {
-	MsgID   string          `json:"msg_id"`
-	Type    string          `json:"type"`
-	Version string          `json:"version,omitempty"`
-	Payload json.RawMessage `json:"payload"`
+	MsgID     string          `json:"msg_id"`
+	Type      string          `json:"type"`
+	Version   string          `json:"version,omitempty"`
+	InReplyTo string          `json:"in_reply_to,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 type cmdPayload struct {
@@ -113,6 +117,40 @@ func audit(line map[string]any) {
 
 var towerUDP *net.UDPAddr
 
+// sendRegister 发送 cmd_register 并等待塔 ACK（A1：塔回 ACK 即上线）；返回是否确认
+func sendRegister(hostname string) bool {
+	p := map[string]any{"terminal_id": terminalID, "hostname": hostname, "listen_port": portNum}
+	p["ts"] = time.Now().UnixMilli()
+	p["nonce"] = fmt.Sprintf("%d", time.Now().UnixNano())
+	p["signature"] = sign(p)
+	env := envelope{MsgID: p["nonce"].(string), Type: "cmd_register", Version: "3.5"}
+	env.Payload, _ = json.Marshal(p)
+	conn, err := net.DialUDP("udp4", nil, towerUDP)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	b, _ := json.Marshal(env)
+	if _, err := conn.Write(b); err != nil {
+		return false
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return false
+	}
+	var ack envelope
+	if json.Unmarshal(buf[:n], &ack) != nil || ack.InReplyTo != env.MsgID {
+		return false
+	}
+	var body struct {
+		OK bool `json:"ok"`
+	}
+	_ = json.Unmarshal(ack.Payload, &body)
+	return body.OK
+}
+
 func sendToTower(msgType string, payload any) {
 	if secret == "" {
 		return // §6.4.14：未配置密钥拒绝上线
@@ -133,9 +171,22 @@ func sendToTower(msgType string, payload any) {
 
 func main() {
 	towerUDP, _ = net.ResolveUDPAddr("udp4", towerAddr)
-	// 注册 + 60s 心跳（§6.4.14）
+	// 注册（A1）：每 5s 重试直至收到塔 ACK（§6.4.14），防止注册包恰好丢在塔启动窗口
 	host, _ := os.Hostname()
-	sendToTower("cmd_register", map[string]any{"terminal_id": terminalID, "hostname": host})
+	registered := false
+	for attempt := 1; attempt <= 12 && !registered; attempt++ {
+		if sendRegister(host) {
+			registered = true
+			break
+		}
+		log.Printf("[cmdterm] register attempt %d no ack, retrying", attempt)
+		time.Sleep(5 * time.Second)
+	}
+	if registered {
+		log.Printf("[cmdterm] registered id=%s listen=:%s", terminalID, port)
+	} else {
+		log.Printf("[cmdterm] register exhausted (12 attempts); heartbeats continue, exec will target stale port")
+	}
 	go func() {
 		for range time.Tick(60 * time.Second) {
 			sendToTower("cmd_heartbeat", map[string]any{"terminal_id": terminalID})
@@ -169,7 +220,14 @@ func main() {
 			result = map[string]any{"ok": false, "reject": reject}
 		} else {
 			start := time.Now()
-			out, execErr := exec.Command("cmd", "/C", p.Command).Output() // Windows；linux 构建换 sh -c
+			// 平台差异：windows 走 cmd /C，unix 走 sh -c；白名单与元字符校验已在 verify 完成
+			var out []byte
+			var execErr error
+			if runtime.GOOS == "windows" {
+				out, execErr = exec.Command("cmd", "/C", p.Command).Output()
+			} else {
+				out, execErr = exec.Command("sh", "-c", p.Command).Output()
+			}
 			entry["result"] = map[bool]string{true: "error", false: "ok"}[execErr != nil]
 			code := 0
 			if ee, ok := execErr.(*exec.ExitError); ok {
@@ -184,7 +242,7 @@ func main() {
 			result = map[string]any{"ok": execErr == nil, "exit_code": code, "stdout": s, "duration_ms": time.Since(start).Milliseconds()}
 		}
 		audit(entry)
-		// 回执一律回塔，不信任来源地址（附录 B.1 cmd_result 单播上行）
-		go sendToTower("cmd_result", map[string]any{"in_reply_to": msg.MsgID, "result": result})
+		// 回执一律回塔，不信任来源地址（附录 B.1 cmd_result 单播上行）；terminal_id 供塔定位密钥
+		go sendToTower("cmd_result", map[string]any{"terminal_id": terminalID, "in_reply_to": msg.MsgID, "result": result})
 	}
 }

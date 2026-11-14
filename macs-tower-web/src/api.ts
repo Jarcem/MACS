@@ -8,14 +8,14 @@ async function get<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+async function post<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${localStorage.getItem('macs_token') ?? ''}`,
     },
-    body: JSON.stringify(body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -34,6 +34,7 @@ export interface Incubator {
   ID: string; Name: string; Status: string; Capacity: number;
   Platforms: string; Drivers: string; ListenPort: number;
   LastIP: string; LastHeartbeat: string; RegisteredAt: string;
+  ActiveWorkers: number; LastLoad: number;
 }
 
 export interface DispatchRow {
@@ -53,6 +54,12 @@ export interface Subtask {
   worker_id: string;
   result: string;
   error: string;
+  kind: string;
+  review_of: string;
+  attempt_count: number;
+  review_round: number;
+  quality_status: string;
+  fingerprint: string;
   created_at: string;
   started_at: string;
   finished_at: string;
@@ -62,8 +69,10 @@ export interface Subtask {
 export interface Task {
   id: string;
   goal: string;
+  title: string;
   status: string;
   progress: number;
+  budget_cents: number;
   created_at: string;
   updated_at: string;
   subtasks?: Subtask[];
@@ -71,7 +80,7 @@ export interface Task {
 
 // 外部 Agent 接入步骤（对应后端 orchestrator.PlanStep）
 export interface PlanStep {
-  mode: 'cli_agent' | 'http_agent';
+  mode: 'cli_agent' | 'http_agent' | 'openai_compatible' | 'anthropic';
   title?: string;
   command?: string;
   args?: string[];
@@ -82,13 +91,92 @@ export interface PlanStep {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  model?: string;
+  prompt?: string;
+  system?: string;
+  review?: boolean;
   depends_on?: number[];
+}
+
+export interface Approval {
+  id: string; task_id: string; subtask_id: string; approval_type: string;
+  status: string; requester: string; title: string; description: string;
+  payload: string; created_at: string; decided_at: string;
+}
+
+export interface SpotCheck {
+  id: string; task_id: string; check_scope: string; status: string;
+  pass_rate: number; overall_passed: number; attempt_count: number; note: string;
+  created_at: string;
+}
+
+export interface ArchiveDoc {
+  id: string; task_id: string; subtask_id: string; source: string; doc_type: string;
+  title: string; content: string; word_count: number; created_at: string;
+}
+
+export interface CostSummary { scope: string; scope_id: string; total_cents: number; records: number; }
+
+export interface AgentPlatform {
+  id: string; platform_name: string; vendor: string; version: string;
+  is_active: boolean; is_system: boolean; default_driver: string; capabilities: string;
+}
+
+export interface CommandTerminal {
+  id: string; name: string; hostname: string; status: string;
+  last_ip: string; listen_port: number; last_heartbeat: string; allow: string;
+}
+
+export interface CommandAuditRow {
+  id: string; terminal_id: string; command: string; ok: boolean;
+  exit_code: number; msg_id: string; duration_ms: number; reject: string; created_at: string;
 }
 
 export const api = {
   incubators: () => getList<Incubator>('/api/v1/incubators'),
   dispatchLog: () => getList<DispatchRow>('/api/v1/dispatch-log'),
-  tasks: () => getList<Task>('/api/v1/tasks'),
-  createTask: (goal: string, plan?: PlanStep[]) =>
-    post<Task>('/api/v1/tasks', plan && plan.length > 0 ? { goal, plan } : { goal }),
+  tasks: (params?: { status?: string; q?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.q) qs.set('q', params.q);
+    const suffix = qs.toString() ? `?${qs}` : '';
+    return getList<Task>(`/api/v1/tasks${suffix}`);
+  },
+  createTask: (goal: string, plan?: PlanStep[], budgetCents?: number) => {
+    const body: Record<string, unknown> = { goal };
+    if (plan && plan.length > 0) body.plan = plan;
+    if (budgetCents && budgetCents > 0) body.budget_cents = budgetCents;
+    return post<Task>('/api/v1/tasks', body);
+  },
+  cancelTask: (id: string) => post(`/api/v1/tasks/${id}/cancel`),
+
+  // M3 质量
+  approvals: (status?: string) => getList<Approval>(`/api/v1/approvals${status ? `?status=${status}` : ''}`),
+  decideApproval: (id: string, decision: 'approved' | 'rejected', note = '') =>
+    post(`/api/v1/approvals/${id}/decision`, { decision, note }),
+  spotChecks: () => getList<SpotCheck>('/api/v1/spot-checks'),
+
+  // M3 归档
+  documents: (taskId?: string) =>
+    getList<ArchiveDoc>(`/api/v1/documents${taskId ? `?task_id=${taskId}` : ''}`),
+  document: (id: string) => get<ArchiveDoc>(`/api/v1/documents/${id}`),
+
+  // M5 成本
+  costsSummary: (taskId?: string) =>
+    get<{ data: CostSummary[]; global_cents: number }>(`/api/v1/costs/summary${taskId ? `?task_id=${taskId}` : ''}`),
+
+  // M6 统一协议
+  agentPlatforms: () => getList<AgentPlatform>('/api/v1/agent-platforms'),
+  registerPlatform: (platform_name: string, vendor: string, default_driver: string) =>
+    post('/api/v1/agent-platforms', { platform_name, vendor, default_driver, protocol_spec: 'openai-compat-protocol' }),
+
+  // M8 命令终端
+  commandTerminals: () => getList<CommandTerminal>('/api/v1/command-terminals'),
+  registerCommandTerminal: (name: string) =>
+    post<{ id: string; name: string; secret: string }>('/api/v1/command-terminals', { name }),
+  rotateCommandSecret: (id: string) =>
+    post<{ id: string; secret: string }>(`/api/v1/command-terminals/${id}/rotate-secret`),
+  execCommand: (id: string, command: string) =>
+    post<{ msg_id: string }>(`/api/v1/command-terminals/${id}/exec`, { command }),
+  commandAudit: (id: string) => getList<CommandAuditRow>(`/api/v1/command-terminals/${id}/audit`),
 };

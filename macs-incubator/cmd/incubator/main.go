@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Jarcem
 
-// macs-incubator 孵化器（M1：模块 #15 UDP 通信 + #16 资源探针 + #17 Reporter）
-// 流程：注册（带令牌）→ 收 dispatch 回 ACK → 60s 周期 report（Q2）→ 断网离线缓冲 → 恢复后补传
+// macs-incubator 孵化器（模块 #15/#16/#17/#18 + M3 质量 + M6 协议驱动）
+// 流程：注册（带令牌与协议驱动能力 §6.4.13.6）→ 收 dispatch
+//   → dispatch_inbox 幂等去重（6.2.4：重复消息直接回 ACK 不重复执行）
+//   → 回 ACK（accepted_subtask_id + available_slots，§6.4.8 统一 ACK 报文）
+//   → dispatch_commit / worker_rollback → 在跑子任务幂等销毁（E16）
+//   → 并发槽受限执行 + 自检报告 → execution_result（指纹 + 遥测）上行
+//   → 60s 周期 report（Q2）→ 断网离线缓冲 → 恢复后补传
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +20,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +59,18 @@ func newMsgID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// localDrivers 能力协商（§6.4.13.6）：按本机 env 装配 协议驱动@版本 列表
+func localDrivers() []string {
+	drivers := []string{"cli-native-protocol@1.0"}
+	if os.Getenv("MACS_OPENAI_API_KEY") != "" {
+		drivers = append(drivers, "openai_compatible@1")
+	}
+	if os.Getenv("MACS_ANTHROPIC_API_KEY") != "" {
+		drivers = append(drivers, "anthropic@2023-06-01")
+	}
+	return drivers
+}
+
 func main() {
 	tower := env("MACS_TOWER_HOST", "127.0.0.1") + ":" + env("MACS_TOWER_PORT", "8470")
 	port := env("MACS_INCUBATOR_PORT", "8473")
@@ -80,19 +99,23 @@ func main() {
 		return err
 	}
 
-	// ── 注册（6.4.2，令牌鉴权）；收 ACK 取 incubator_id ──
+	// ── 注册（6.2.2，令牌鉴权 + 能力协商）；收 ACK 取 incubator_id ──
 	portNum, _ := strconv.Atoi(port)
+	platforms := []string{"macs-builtin"}
+	if os.Getenv("MACS_OPENAI_API_KEY") != "" || os.Getenv("MACS_ANTHROPIC_API_KEY") != "" {
+		platforms = append(platforms, "openai-compat-protocol", "anthropic-msg-protocol")
+	}
 	reg := newEnv("register", map[string]any{
-		"name": name, "capacity": maxWorkers, "platforms": []string{}, "drivers": []string{},
+		"name": name, "capacity": maxWorkers, "platforms": platforms, "drivers": localDrivers(),
 		"listen_port": portNum, "token": token, "ts": time.Now().UnixMilli(),
 	})
 	incubatorID := ""
-	for attempt := 1; attempt <= 5; attempt++ {
+	for attempt := 1; attempt <= 12; attempt++ { // 6.2.2：每 5s 重发，最多 12 次
 		conn, err := net.DialUDP("udp4", nil, towerAddr)
 		if err == nil {
 			b, _ := json.Marshal(reg)
 			_, _ = conn.Write(b)
-			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(4 * time.Second))
 			buf := make([]byte, 4096)
 			if n, err := conn.Read(buf); err == nil {
 				var ack envelope
@@ -110,51 +133,105 @@ func main() {
 			break
 		}
 		log.Printf("[incubator] register attempt %d failed, retrying", attempt)
-		time.Sleep(time.Duration(attempt) * time.Second)
+		time.Sleep(5 * time.Second)
 	}
-	log.Printf("[incubator] registered id=%s listen=%s", incubatorID, port)
+	log.Printf("[incubator] registered id=%s listen=%s drivers=%v", incubatorID, port, localDrivers())
 
-	// ── 模块 #18 spawner：dispatch → 并发受限的 worker 执行 + 结果回传（M2 垂直切片）──
+	// ── 模块 #18 spawner：并发槽 + 在跑子任务登记（worker_rollback 幂等销毁 E16）──
 	sem := make(chan struct{}, maxWorkers)
 	var workerSeq int64
+	var execMu sync.Mutex
+	active := map[string]context.CancelFunc{} // subtask_id → cancel（rollback 用）
+
+	rollback := func(subtaskID string) {
+		execMu.Lock()
+		cancel, ok := active[subtaskID]
+		execMu.Unlock()
+		if ok {
+			cancel() // 幂等销毁：取消执行上下文，结果不再回传
+			log.Printf("[incubator] worker_rollback subtask=%s destroyed", subtaskID)
+		}
+	}
+
 	execute := func(subtaskID string, taskDef map[string]any) {
 		sem <- struct{}{}
 		defer func() { <-sem }()
-		log.Printf("[incubator] execute start subtask=%s cap=%d", subtaskID, cap(sem))
 
-		// taskDef 直接落到 Job：内置模式与 cli_agent/http_agent 字段共用同一份下发体
+		ctx, cancel := context.WithCancel(context.Background())
+		execMu.Lock()
+		if _, exists := active[subtaskID]; exists { // dispatch_inbox 已挡重复，双保险
+			execMu.Unlock()
+			cancel()
+			return
+		}
+		active[subtaskID] = cancel
+		execMu.Unlock()
+		finish := func() {
+			execMu.Lock()
+			delete(active, subtaskID)
+			execMu.Unlock()
+			cancel()
+		}
+		defer finish()
+
+		log.Printf("[incubator] execute start subtask=%s cap=%d", subtaskID, cap(sem))
 		var job worker.Job
 		if b, err := json.Marshal(taskDef); err == nil {
 			_ = json.Unmarshal(b, &job)
 		}
-		log.Printf("[incubator] execute run subtask=%s mode=%q shard=%q len=%d deps=%d", subtaskID, job.Mode, job.Shard, len(job.Text), len(job.Deps))
 		if job.Mode == "cli_agent" {
 			log.Printf("[incubator] execute cli subtask=%s command=%q args=%d cwd=%q", subtaskID, job.Command, len(job.Args), job.Cwd)
 		}
-		if job.Mode == "http_agent" {
-			log.Printf("[incubator] execute http subtask=%s method=%q url=%q", subtaskID, job.Method, job.URL)
+		if job.Mode == "openai_compatible" || job.Mode == "anthropic" {
+			log.Printf("[incubator] execute llm subtask=%s driver=%q model=%q", subtaskID, job.Mode, job.Model)
 		}
-		out := worker.Run(job)
+
+		// 任务遥测起点（§6.4.13.4 task_start）
+		_ = send(newEnv("telemetry_stream", map[string]any{
+			"subtask_id": subtaskID, "incubator_id": incubatorID, "event_type": "task_start",
+			"payload": map[string]any{"mode": job.Mode},
+		}))
+
+		out := worker.RunWithContext(ctx, job)
+		if out.Status == "" && ctx.Err() != nil {
+			return // 被 worker_rollback / dispatch_commit 销毁：不回传结果
+		}
 		log.Printf("[incubator] execute done subtask=%s status=%s dur=%dms", subtaskID, out.Status, out.DurationMs)
 
+		// ── 自检报告（模块 #23，done 验收门随结果上行）──
+		selfCheck := worker.Check(job, out)
+		fp := ""
+		if out.Status == "completed" {
+			fp = worker.Fingerprint(out.Result)
+		}
 		payload := map[string]any{
 			"subtask_id": subtaskID, "incubator_id": incubatorID,
 			"worker_id": fmt.Sprintf("%s/%d", name, atomic.AddInt64(&workerSeq, 1)),
 			"status":    out.Status, "result": out.Result, "error": out.Error,
 			"started_at": out.StartedAt, "finished_at": out.FinishedAt, "duration_ms": out.DurationMs,
+			"fingerprint": fp, "self_check": selfCheck,
+		}
+		// LLM 模式：usage 从结果 JSON 提取 → 遥测回填 cost_records（6.4.9）
+		if job.Mode == "openai_compatible" || job.Mode == "anthropic" {
+			var r struct {
+				TokenUsage *worker.Usage `json:"token_usage"`
+			}
+			if json.Unmarshal([]byte(out.Result), &r) == nil && r.TokenUsage != nil {
+				payload["telemetry_metrics"] = map[string]any{
+					"token_usage": r.TokenUsage, "duration_ms": out.DurationMs,
+					"agent_platform": job.Mode, "platform_adapter": job.Mode + "-driver",
+				}
+			}
 		}
 		env := newEnv("execution_result", payload)
-		log.Printf("[incubator] execution_result send subtask=%s msg_id=%s -> %s", subtaskID, env.MsgID, towerAddr)
 		if err := send(env); err != nil {
 			b, _ := json.Marshal(payload)
 			st.Buffer("execution_result", string(b)) // 断网缓存，Reporter 补传
 			log.Printf("[incubator] execution_result buffered: %v", err)
-		} else {
-			log.Printf("[incubator] execution_result sent subtask=%s", subtaskID)
 		}
 	}
 
-	// ── 模块 #15：监听调度下行，dispatch 回 ACK ──
+	// ── 模块 #15：监听调度下行 ──
 	laddr, _ := net.ResolveUDPAddr("udp4", ":"+port)
 	conn, err := net.ListenUDP("udp4", laddr)
 	if err != nil {
@@ -171,28 +248,72 @@ func main() {
 			if json.Unmarshal(buf[:n], &msg) != nil || msg.MsgID == "" {
 				continue
 			}
-			log.Printf("[incubator] recv type=%s msg_id=%s in_reply_to=%s", msg.Type, msg.MsgID, msg.InReplyTo)
-			if msg.Type == "ack" {
-				continue // ACK 不再回 ACK，避免 ACK 乒乓风暴
+			log.Printf("[incubator] recv type=%s msg_id=%s", msg.Type, msg.MsgID)
+			switch msg.Type {
+			case "ack":
+				continue // ACK 不再回 ACK，避免乒乓风暴
+			case "dispatch_commit":
+				// 6.4.3：广播承接锁定通知 → 停止应答、不孵化；在跑则幂等销毁
+				var p struct {
+					SubtaskID string `json:"subtask_id"`
+				}
+				_ = json.Unmarshal(msg.Payload, &p)
+				if p.SubtaskID != "" {
+					rollback(p.SubtaskID)
+				}
+				continue
+			case "worker_rollback":
+				var p struct {
+					SubtaskID string `json:"subtask_id"`
+				}
+				_ = json.Unmarshal(msg.Payload, &p)
+				if p.SubtaskID != "" {
+					rollback(p.SubtaskID)
+				}
+				continue
+			case "capability_query":
+				// §6.4.13.2：返回已注册平台与协议驱动
+				ack := newEnv("ack", map[string]any{
+					"ok": true, "incubator_id": incubatorID,
+					"platforms": platforms, "drivers": localDrivers(),
+				})
+				ack.InReplyTo = msg.MsgID
+				b, _ := json.Marshal(ack)
+				_, _ = conn.WriteToUDP(b, src)
+				continue
 			}
-			ack := newEnv("ack", map[string]any{"ok": true})
+
+			// dispatch 处理：dispatch_inbox 幂等去重（6.2.4：重复消息直接回 ACK 不重复执行）
+			var p struct {
+				SubtaskID string         `json:"subtask_id"`
+				TaskDef   map[string]any `json:"task_def"`
+			}
+			if json.Unmarshal(msg.Payload, &p) != nil || p.SubtaskID == "" {
+				continue
+			}
+			dup, _ := st.RecordDispatch(msg.MsgID, msg.Type, string(msg.Payload))
+			ackBody := map[string]any{
+				"ok": true, "incubator_id": incubatorID,
+				"accepted_subtask_id": p.SubtaskID,
+				"available_slots":     maxWorkers - len(active),
+			}
+			if dup {
+				ackBody["duplicate"] = true // 幂等回执：已执行过，仅重发 ACK
+			}
+			ack := newEnv("ack", ackBody)
 			ack.InReplyTo = msg.MsgID
 			b, _ := json.Marshal(ack)
 			_, _ = conn.WriteToUDP(b, src)
-			if msg.Type == "dispatch" {
-				var p struct {
-					SubtaskID string         `json:"subtask_id"`
-					TaskDef   map[string]any `json:"task_def"`
-				}
-				if json.Unmarshal(msg.Payload, &p) == nil && p.SubtaskID != "" {
-					log.Printf("[incubator] spawn worker subtask=%s", p.SubtaskID)
-					go execute(p.SubtaskID, p.TaskDef)
-				}
+
+			if !dup && msg.Type == "dispatch" {
+				log.Printf("[incubator] spawn worker subtask=%s", p.SubtaskID)
+				go execute(p.SubtaskID, p.TaskDef)
 			}
 		}
 	}()
 
 	// ── 模块 #17 Reporter：周期上报 + 离线缓冲补传 ──
+	probe.SetActiveProvider(func() int { return len(active) })
 	for range time.Tick(reportEvery) {
 		// 先补传缓冲（fail-open：补传失败继续缓存）
 		if pending, _ := st.Pending(); len(pending) > 0 {
@@ -202,11 +323,27 @@ func main() {
 				}
 			}
 		}
-		payload := map[string]any{"incubator_id": incubatorID, "probe": probe.Collect(maxWorkers), "ts": time.Now().UnixMilli()}
+		m := probe.Collect(maxWorkers)
+		payload := map[string]any{
+			"incubator_id": incubatorID, "probe": m, "ts": time.Now().UnixMilli(),
+			"capacity": map[string]any{
+				"max_workers": maxWorkers, "active_workers": m.ActiveCount,
+				"available_slots": maxWorkers - m.ActiveCount,
+			},
+			"load": m.LoadRatio, // 负载水位（6.4.7 评分依据，probe 已算好）
+			"drivers": localDrivers(),
+		}
 		if err := send(newEnv("report", payload)); err != nil {
 			b, _ := json.Marshal(payload)
 			st.Buffer("report", string(b)) // 断网缓存（§离线缓冲）
 			log.Printf("[incubator] report failed, buffered: %v", err)
 		}
 	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

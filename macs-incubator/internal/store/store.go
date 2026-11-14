@@ -6,6 +6,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,10 +59,22 @@ func (s *Store) Migrate(dir string) error {
 	return nil
 }
 
-// Buffer 断网时缓存上报（telemetry_events_local，synced=0）
+// Buffer 断网时缓存上报（telemetry_events_local，synced=0；id 用 UnixNano 保证唯一）
 func (s *Store) Buffer(eventType, payload string) {
 	_, _ = s.db.Exec(`INSERT INTO telemetry_events_local(id,event_type,payload,synced,created_at) VALUES(?,?,?,0,?)`,
-		time.Now().UnixNano(), eventType, payload, time.Now().UTC().Format(time.RFC3339))
+		fmt.Sprintf("%d", time.Now().UnixNano()), eventType, payload, time.Now().UTC().Format(time.RFC3339))
+}
+
+// RecordDispatch dispatch_inbox 幂等登记（6.2.4：重复下发不重复执行，仅重 ACK）
+// 返回 dup=true 表示该 msg_id 已处理过
+func (s *Store) RecordDispatch(msgID, msgType, payload string) (bool, error) {
+	res, err := s.db.Exec(`INSERT OR IGNORE INTO dispatch_inbox(msg_id,type,payload) VALUES(?,?,?)`,
+		msgID, msgType, payload)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 0, nil
 }
 
 // Pending 取待同步缓冲（上限 100 条/批）

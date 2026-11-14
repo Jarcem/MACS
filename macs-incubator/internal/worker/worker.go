@@ -6,6 +6,9 @@
 package worker
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -38,6 +41,17 @@ type Job struct {
 	Method    string            `json:"method"`
 	Headers   map[string]string `json:"headers"`
 	Body      string            `json:"body"`
+
+	// 协议驱动模式（6.4.9 openai_compatible / anthropic）：凭据由孵化器 env 注入
+	Model     string `json:"model"`
+	Prompt    string `json:"prompt"`
+	System    string `json:"system"`
+	MaxTokens int    `json:"max_tokens"`
+
+	// review 模式（FR-14 独立复核）：重跑原任务并比对指纹
+	ReviewJob     json.RawMessage `json:"review_job"`
+	ReviewExpect  string          `json:"review_expect"`
+	ReviewRound   int             `json:"review_round"`
 }
 
 type Outcome struct {
@@ -51,6 +65,12 @@ type Outcome struct {
 
 // Run 同步执行一个子任务
 func Run(j Job) Outcome {
+	return RunWithContext(context.Background(), j)
+}
+
+// RunWithContext 可取消执行（worker_rollback / dispatch_commit 幂等销毁语义）：
+// Agent 型模式透传 ctx；ctx 取消后返回空 Outcome（调用方据此跳过结果回传）
+func RunWithContext(ctx context.Context, j Job) Outcome {
 	start := time.Now()
 	out := Outcome{StartedAt: start.UTC().Format(time.RFC3339)}
 
@@ -64,9 +84,13 @@ func Run(j Job) Outcome {
 			out.Result = analyze(j.Shard, j.Text)
 		}
 	case "cli_agent":
-		out.Status, out.Result, out.Error = apply(runCLI(j))
+		out.Status, out.Result, out.Error = apply(runCLI(ctx, j))
 	case "http_agent":
-		out.Status, out.Result, out.Error = apply(runHTTP(j))
+		out.Status, out.Result, out.Error = apply(runHTTP(ctx, j))
+	case "openai_compatible":
+		out.Status, out.Result, out.Error = apply(runLLM(ctx, j, openaiCompatDriver))
+	case "anthropic":
+		out.Status, out.Result, out.Error = apply(runLLM(ctx, j, anthropicDriver))
 	case "merge":
 		if len(j.Deps) == 0 {
 			out.Status = "failed"
@@ -78,9 +102,15 @@ func Run(j Job) Outcome {
 			out.Status = "completed"
 			out.Result = merged
 		}
+	case "review":
+		out = runReview(j)
 	default:
 		out.Status = "failed"
 		out.Error = fmt.Sprintf("unsupported mode: %s", j.Mode)
+	}
+
+	if ctx.Err() != nil { // 已被回滚：调用方不回传结果
+		return Outcome{StartedAt: out.StartedAt}
 	}
 
 	out.FinishedAt = time.Now().UTC().Format(time.RFC3339)
@@ -89,6 +119,12 @@ func Run(j Job) Outcome {
 		out.Status = "completed"
 	}
 	return out
+}
+
+// Fingerprint 产物指纹（6.4.4：无父产物 sha256(content)；父链由塔侧维护）
+func Fingerprint(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // apply 只取 agent 执行结果的状态字段，计时仍由 Run 统一填写
