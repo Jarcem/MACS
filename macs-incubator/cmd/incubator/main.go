@@ -312,17 +312,20 @@ func main() {
 		}
 	}()
 
-	// ── 模块 #17 Reporter：周期上报 + 离线缓冲补传 ──
+	// ── 模块 #17 Reporter：周期上报 + 离线缓冲补传（6.4.5 指数退避 + Q6 14 天清理）──
 	probe.SetActiveProvider(func() int { return len(active) })
 	for range time.Tick(reportEvery) {
-		// 先补传缓冲（fail-open：补传失败继续缓存）
-		if pending, _ := st.Pending(); len(pending) > 0 {
-			for _, p := range pending {
+		// 先补传退避到期的缓冲（fail-open：补传失败按指数退避顺延，不丢数据）
+		if due, _ := st.DuePending(); len(due) > 0 {
+			for _, p := range due {
 				if err := send(newEnv(p.EventType, json.RawMessage(p.Payload))); err == nil {
 					st.MarkSynced(p.ID)
+				} else {
+					st.MarkFailed(p.ID)
 				}
 			}
 		}
+		st.PurgeExpired()
 		m := probe.Collect(maxWorkers)
 		payload := map[string]any{
 			"incubator_id": incubatorID, "probe": m, "ts": time.Now().UnixMilli(),

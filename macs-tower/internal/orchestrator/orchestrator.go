@@ -245,10 +245,10 @@ func (o *Orchestrator) HandleResult(r Result) {
 		return
 	}
 
-	// ── 复核子任务回传 → E04 回路（幂等：终态复核不重复生效，防广播双跑重复归档）──
+	// ── 复核子任务回传 → E04 回路（幂等：非在途回传一律吸收，防广播双跑/重放重复归档）──
 	if sub.Kind == "review" {
-		if sub.Status == "completed" || sub.Status == "failed" {
-			return
+		if sub.Status != "pending" && sub.Status != "dispatched" && sub.Status != "running" {
+			return // E07：终态复核重复回传不重复生效
 		}
 		verdict, note := parseReviewVerdict(r, sub)
 		status := "completed"
@@ -262,8 +262,10 @@ func (o *Orchestrator) HandleResult(r Result) {
 	}
 
 	// ── 普通执行结果 ──
-	if sub.Status == "completed" || sub.Status == "failed" {
-		return // 幂等：终态重复回传（重放/补传）不重复生效
+	// 幂等（E07）：仅受理在途子任务的回传；终态/completed-after-review/补传重放直接吸收，
+	// 否则重放会重复落 cost_records / telemetry_events / 追溯链副作用
+	if sub.Status != "dispatched" && sub.Status != "running" {
+		return
 	}
 
 	status := "completed"
@@ -648,8 +650,11 @@ func (o *Orchestrator) selectIncubators(incs []store.Incubator, running map[stri
 		if slots <= 0 || inc.ListenPort <= 0 || inc.LastIP == "" {
 			continue
 		}
-		// 硬过滤：协议驱动能力（§6.4.13.6 能力协商）
+		// 硬过滤：协议驱动能力（§6.4.13.6 能力协商）+ 断路器（6.4.10 熔断期不承接）
 		if driver != "" && !hasDriver(inc.Drivers, driver) {
+			continue
+		}
+		if o.disp.CircuitOpen(inc.ID) {
 			continue
 		}
 		idleScore := float64(slots) / float64(max(1, inc.Capacity))

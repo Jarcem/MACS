@@ -48,9 +48,57 @@ type pendingAck struct {
 }
 
 type Dispatcher struct {
-	store   *store.Store
-	conn    *net.UDPConn
-	pending sync.Map // msg_id → *pendingAck
+	store    *store.Store
+	conn     *net.UDPConn
+	pending  sync.Map // msg_id → *pendingAck
+	breakers sync.Map // incubator_id → *breaker（6.4.10 上游断路器）
+}
+
+// breaker 断路器：同一孵化器连续 5 次下发失败 → 熔断 60s（半开探测由过期自动恢复实现）
+type breaker struct {
+	fails     int
+	openUntil time.Time
+}
+
+const (
+	breakerThreshold = 5
+	breakerOpenFor   = 60 * time.Second
+)
+
+// CircuitOpen 熔断期内该节点不承接新调度（等价临时下线，orchestrator 选机过滤）
+func (d *Dispatcher) CircuitOpen(incubatorID string) bool {
+	if d == nil {
+		return false // 测试裸构造 Orchestrator 时 nil 安全
+	}
+	v, ok := d.breakers.Load(incubatorID)
+	if !ok {
+		return false
+	}
+	b := v.(*breaker)
+	if time.Now().Before(b.openUntil) {
+		return true
+	}
+	// 半开：熔断过期后清零，允许探测
+	d.breakers.Delete(incubatorID)
+	return false
+}
+
+func (d *Dispatcher) noteFailure(incubatorID string) {
+	v, _ := d.breakers.LoadOrStore(incubatorID, &breaker{})
+	b := v.(*breaker)
+	b.fails++
+	if b.fails >= breakerThreshold && time.Now().After(b.openUntil) {
+		b.openUntil = time.Now().Add(breakerOpenFor)
+		_ = d.store.InsertGuardrailEvent(store.GuardrailEvent{
+			ID: store.NewID(), IncubatorID: incubatorID,
+			Type: "circuit_breaker", Action: "paused",
+			Detail: fmt.Sprintf(`{"consecutive_failures":%d,"open_for_sec":%d}`, b.fails, int(breakerOpenFor.Seconds())),
+		})
+	}
+}
+
+func (d *Dispatcher) noteSuccess(incubatorID string) {
+	d.breakers.Delete(incubatorID)
 }
 
 func New(st *store.Store, conn *net.UDPConn) *Dispatcher {
@@ -224,6 +272,7 @@ func (d *Dispatcher) DispatchTo(ctx context.Context, target *store.Incubator, su
 			wait = backoff[attempt]
 		}
 		if err := d.waitAck(ctx, p, wait); err == nil {
+			d.noteSuccess(target.ID)
 			return target.ID, nil
 		} else if errors.Is(err, ErrDriverMismatch) {
 			d.store.SetDispatchAck(msgID, "driver_mismatch")
@@ -231,6 +280,7 @@ func (d *Dispatcher) DispatchTo(ctx context.Context, target *store.Incubator, su
 		}
 	}
 	d.store.SetDispatchAck(msgID, "failed")
+	d.noteFailure(target.ID) // 6.4.10：连续失败累计，达阈值熔断 60s
 	return "", fmt.Errorf("dispatch timeout after %d retransmits (subtask=%s target=%s)", maxRetransmits, subtaskID, target.Name)
 }
 
@@ -287,9 +337,13 @@ func (d *Dispatcher) DispatchBroadcast(ctx context.Context, candidates []*store.
 		p.mu.Lock()
 		winner := p.winner
 		p.mu.Unlock()
+		d.noteSuccess(winner)
 		return winner, nil
 	case <-time.After(ackTotalWindow):
 		d.store.SetDispatchAck(msgID, "failed")
+		for id := range cands {
+			d.noteFailure(id) // 全体候选未确认，均计入连续失败
+		}
 		return "", fmt.Errorf("broadcast ack window exhausted (subtask=%s, candidates=%d)", subtaskID, len(cands))
 	}
 }
