@@ -119,7 +119,7 @@ Registration, dispatch, ACK, execution results and commands are all persisted (S
 </td>
 <td align="center">
 <h3>🧠 Bring your own agent</h3>
-The execution unit is replaceable: built-in text analysis, a local CLI agent (Zcode / DeepSeek Harness via argv), or an HTTP agent endpoint.
+Replaceable execution units: built-in text analysis, local CLI agents (argv launch), HTTP agents, and OpenAI / Anthropic protocol drivers (credentials stay on the incubator).
 </td>
 </tr>
 </table>
@@ -235,7 +235,7 @@ Port assignments (per Appendix A · Q9 of the design docs):
 </td>
 <td>
 
-**Worker unit** — a uniform `Job{Mode, Shard, Text} → Outcome` contract; currently `text_analysis` (characters, non-space, unique, top characters), replaceable with a real agent.
+**Worker unit** — a uniform `Job → Outcome` contract; built-in `text_analysis` (character stats), `merge`, `review` (independent re-verification); agent adapters `cli_agent` (argv launch), `http_agent`, and `openai_compatible` / `anthropic` protocol drivers (credentials stay on the incubator).
 
 </td>
 </tr>
@@ -446,6 +446,8 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 | POST           | `/api/v1/command-terminals/{id}/rotate-secret`  | Rotate terminal secret (danger scope; 10-minute dual-validity window)  |
 | GET            | `/api/v1/command-terminals/{id}/audit`          | Terminal command audit (A3 reconciliation)                             |
 | POST           | `/api/v1/admin-tokens`                          | Issue admin tokens (danger scope; read/ops/danger)                     |
+| POST           | `/api/v1/incubators/{id}/rotate-token`          | Rotate incubator registration token (danger scope; shown once)         |
+| GET/POST       | `/api/v1/notify-channels`                       | Alert notification channels (webhook first; POST = danger scope)       |
 | POST           | `/api/v1/dispatch`                              | Manual dispatch (debugging, ops scope)                                 |
 
 <br/>
@@ -509,6 +511,15 @@ macs/
 - ✅ **M7 DSH monitoring terminal**: Ink TUI read-only monitor (REST/SSE data source aligned with the web HUD)
 - ✅ **M8 Command terminal**: per-terminal keys + HMAC-signed issuance (60s replay window) + allowlisted execution + register-ACK retry + audit reconciliation + secret rotation
 - ⚪ PostgreSQL production rollout + multi-tower federation
+
+**Known boundaries** (protocol/data plane ready, feature wiring pending):
+
+- `fetch_request` large-content chunked transfer: envelope constant defined; unused while artifacts stay <256KB
+- 6.4.10 guardrails: wake-loop freeze (frozen + guardrail approval), done acceptance gate and worker TTL watchdog are live; circuit breaker / idle-downgrade / bounded-context pending
+- Downlink commands `task_updated` / `approval_result` / `template_updated` / `config_updated` / `spot_check_request` / `merge_instruction`: constants ready, features wire on demand (task cancel already stops dispatching tower-side)
+- Incubator-side `budget_changed` enforcement pending (tower-side budget gate already active at the dispatch boundary)
+- 6.5 monthly budget reset and archive cleanup timers; cmdterm audit 90-day rotation
+- Local §3.7 self-check/review report tables (reports currently ride inside `execution_result` payload + tower-side archive)
 
 <br/>
 

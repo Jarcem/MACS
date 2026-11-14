@@ -175,6 +175,31 @@ func (s *Store) SetDispatchAck(msgID, status string) {
 	_, _ = s.db.Exec(`UPDATE dispatch_log SET ack_status=?, acked_at=? WHERE msg_id=?`, status, now(), msgID)
 }
 
+// StuckDispatchRow 塔重启后卡在下发中的行（E13 兜底）
+type StuckDispatchRow struct {
+	MsgID     string
+	SubtaskID string
+}
+
+// ListStuckDispatchRows 6.5 ackRetransmitTick 兜底：卡在 sent/retransmitted 且超过确认窗口的行
+func (s *Store) ListStuckDispatchRows(olderThan string) ([]StuckDispatchRow, error) {
+	rows, err := s.db.Query(`SELECT msg_id, subtask_id FROM dispatch_log
+		WHERE ack_status IN ('sent','retransmitted') AND last_sent_at <> '' AND last_sent_at < ?`, olderThan)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StuckDispatchRow
+	for rows.Next() {
+		var r StuckDispatchRow
+		if err := rows.Scan(&r.MsgID, &r.SubtaskID); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 type DispatchRow struct {
 	ID           string `json:"id"`
 	SubtaskID    string `json:"subtask_id"`

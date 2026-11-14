@@ -1,7 +1,7 @@
+#!/usr/bin/env node
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Jarcem
 
-#!/usr/bin/env node
 import React from 'react';
 import { render } from 'ink';
 import { App } from './App.js';

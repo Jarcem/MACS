@@ -119,22 +119,61 @@ export function TelemetryView() {
 // 交互平面 · 历史任务记录（V1.4 §16.2，/tasks/history 同内容：近 50 条倒序 + 进度条列）
 export function HistoryView() {
   const { data, error } = usePolling(() =>
-    get<unknown[]>('/api/v1/tasks?pageSize=50&sort=updated_at%20DESC'),
+    get<{ data?: unknown[] }>('/api/v1/tasks?pageSize=50&sort=updated_at%20DESC'),
   );
-  const rows = (Array.isArray(data) ? data : []).map((t) => {
+  const rows = (Array.isArray(data?.data) ? data!.data : []).map((t) => {
     const r = t as Record<string, unknown>;
-    const pct = Number(r.progress_percent ?? 0);
+    const pct = Number(r.progress ?? 0);
     return {
       id: String(r.id ?? '').slice(0, 8),
-      title: String(r.title ?? '').slice(0, 18),
-      status: String(r.archived ? `${r.status}·归档` : r.status),
+      goal: String(r.goal ?? '').slice(0, 18),
+      status: String(r.status),
       进度: `${bar(pct, 10)} ${pct}%`,
-      耗时: r.duration_sec != null ? `${Math.round(Number(r.duration_sec) / 60)}m` : '-',
-      cost: r.cost_cents != null ? `¥${(Number(r.cost_cents) / 100).toFixed(2)}` : '-',
-      完成: r.finished_at ? String(r.finished_at).slice(0, 16).replace('T', ' ') : '-',
+      提交: r.created_at ? String(r.created_at).slice(0, 16).replace('T', ' ') : '-',
+      更新: r.updated_at ? String(r.updated_at).slice(0, 16).replace('T', ' ') : '-',
     };
   });
   return <ViewShell title="历史任务记录（近 50 条，updated_at DESC）" error={error}><JsonTable rows={rows} max={15} /></ViewShell>;
+}
+
+// 交互+监控平面 · 质量看板（/approvals /monitor/quality 同内容：审批 + 抽查）
+export function QualityView() {
+  const approvals = usePolling(api.approvals);
+  const checks = usePolling(api.spotChecks);
+  return (
+    <Box flexDirection="column">
+      <ViewShell title="审批中心（pending 待审优先）" error={approvals.error}>
+        <JsonTable rows={orderPending(approvals.data)} max={8} />
+      </ViewShell>
+      <ViewShell title="抽查核验（E06 追溯链对账）" error={checks.error}>
+        <JsonTable rows={checks.data} max={8} />
+      </ViewShell>
+    </Box>
+  );
+}
+
+function orderPending(rows: unknown[] | null): unknown[] | null {
+  if (!rows) return rows;
+  const list = [...(rows as Record<string, unknown>[])];
+  list.sort((a, b) => Number(b.status === 'pending') - Number(a.status === 'pending'));
+  return list;
+}
+
+// 监控平面 · 成本看板（/monitor/cost 同内容）
+export function CostView() {
+  const { data, error } = usePolling(api.costsSummary);
+  const rows = (data?.data ?? []) as Record<string, unknown>[];
+  return (
+    <ViewShell title={`成本中心 · 全局累计 ${data?.global_cents ?? '-'} 分`} error={error}>
+      <JsonTable rows={rows} max={10} />
+    </ViewShell>
+  );
+}
+
+// 交互平面 · 归档文档库（/archive 同内容）
+export function ArchivesView() {
+  const { data, error } = usePolling(api.documents);
+  return <ViewShell title="归档文档（handoff / review / final_summary）" error={error}><JsonTable rows={data} max={12} /></ViewShell>;
 }
 
 // 监控平面 · 运行总览（/overview 同内容：孵化器在线 + 任务统计聚合）

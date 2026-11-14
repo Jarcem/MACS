@@ -119,7 +119,7 @@ Ink TUI 只读终端，内容对齐 Web 看板，适合放在透明显示设备�
 </td>
 <td align="center">
 <h3>🧠 自带 Agent</h3>
-执行单元可替换：内置文本分析、本机 CLI Agent（Zcode / DeepSeek Harness，argv 直启）、HTTP Agent 接口。
+执行单元可替换：内置文本分析、本机 CLI Agent（argv 直启）、HTTP Agent、OpenAI / Anthropic 协议驱动（凭据仅存孵化器本机）。
 </td>
 </tr>
 </table>
@@ -233,7 +233,7 @@ MACS 把分布式编排里最容易写错的地方做对了。
 </td>
 <td>
 
-**Worker 执行单元** — 统一 `Job{Mode, Shard, Text} → Outcome`；当前实现 `text_analysis`（字符/有效字符/去重/高频字符统计），后续替换为真实 Agent。
+**Worker 执行单元** — 统一 `Job → Outcome`；内置 `text_analysis`（字符统计）、`merge`（汇总）、`review`（独立复核）；Agent 接入 `cli_agent`（argv 直启）、`http_agent`、`openai_compatible` / `anthropic` 协议驱动（凭据仅存本机）。
 
 </td>
 </tr>
@@ -444,6 +444,8 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 | POST    | `/api/v1/command-terminals/{id}/rotate-secret`| 终端密钥轮换（danger scope，10 分钟双验窗口）                 |
 | GET     | `/api/v1/command-terminals/{id}/audit`        | 终端指令审计（A3 对账）                                       |
 | POST    | `/api/v1/admin-tokens`                        | 签发 Admin Token（danger scope，read/ops/danger）             |
+| POST    | `/api/v1/incubators/{id}/rotate-token`        | 孵化器注册令牌轮换（danger scope，独立令牌一次性展示）        |
+| GET/POST| `/api/v1/notify-channels`                     | 告警通知渠道（webhook 单通道；POST danger scope）             |
 | POST    | `/api/v1/dispatch`                            | 手工下发（调试用，ops scope）                                 |
 
 <br/>
@@ -508,6 +510,16 @@ macs/
 - ✅ **M7 DSH 监控终端**：Ink TUI 只读监控（REST/SSE 数据源，对齐 Web 看板）
 - ✅ **M8 命令终端**：每终端独立密钥 + HMAC 签发（60s 时间窗防重放）+ 白名单执行 + 注册 ACK 重试 + 审计双写对账 + 密钥轮换（10 分钟双验）
 - ⚙️ **后续迭代**：AI 语义拆解、TCP 兜底通道、模板市场、多租户（见主设计 §3.3 范围三态）
+
+**已知边界**（协议/数据面已就绪、特性未接线的部分）：
+
+- `fetch_request` 大内容分片传输：UDP 信封常量已定义，当前产物均 <256KB 未启用
+- 6.4.10 护栏已实现唤醒环冻结（frozen + guardrail 审批）与 done 验收门 + Worker TTL 看门狗；断路器 / 空闲下岗 / 有界上下文待接入
+- 下行指令 `task_updated` / `approval_result` / `template_updated` / `config_updated` / `spot_check_request` / `merge_instruction`：协议常量就绪，对应特性按需接线（任务取消已在塔侧停派生效）
+- 孵化器侧 `budget_changed` 上界应用待接线（塔侧预算门已在派发边界生效）
+- 6.5 预算月度重置、归档清理定时任务；cmdterm 审计 90 天轮转
+- 孵化器本地 §3.7 自检/复核报告表（当前报告嵌入 `execution_result` 载荷 + 塔侧归档，不落本地表）
+- PostgreSQL 正式落地（当前 SQLite 单库，`DATABASE_URL` 预留）、多塔联邦
 - ⚪ PostgreSQL 正式落地 + 多塔联邦
 
 <br/>

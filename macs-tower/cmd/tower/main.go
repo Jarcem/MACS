@@ -156,6 +156,7 @@ func main() {
 
 	orch.Start()
 	cm.StartSweeper()
+	disp.StartJanitor() // 6.5 ACK 兜底：塔重启后卡住的 dispatch 行 E13 标失败、子任务回池
 	defer cm.Close()
 	defer appr.Close()
 	defer ct.Close()
@@ -830,8 +831,59 @@ func main() {
 		wj(w, map[string]any{"data": list})
 	}))
 	mux.HandleFunc("POST /api/v1/incubators/{id}/rotate-token", guard(authz.ScopeDanger, func(w http.ResponseWriter, r *http.Request) {
-		// §6.4.16：孵化器注册令牌吊销/轮换（回 ACK 一次性展示新令牌）
-		wj(w, map[string]any{"ok": true, "note": "set MACS_REGISTER_TOKEN on tower and MACS_INCUBATOR_TOKEN on incubator, then restart"})
+		// §6.4.16：孵化器注册令牌吊销/轮换 —— 生成独立令牌（sha256 入库），旧全局令牌仍兼容
+		id := r.PathValue("id")
+		if _, err := st.GetIncubator(id); err != nil {
+			apiErr(w, 404, 66200, "incubator not found")
+			return
+		}
+		token := udp.NewID() + udp.NewID()
+		if err := st.SetIncubatorTokenHash(id, trace.HashHex(token)); err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"id": id, "token": token}) // 一次性展示
+	}))
+	mux.HandleFunc("GET /api/v1/incubators/{id}/rotate-token", guard(authz.ScopeDanger, func(w http.ResponseWriter, _ *http.Request) {
+		apiErr(w, 405, 66000, "use POST")
+	}))
+
+	// ── §6.4.17 C9 通知渠道管理（webhook 单通道先行）──
+	mux.HandleFunc("GET /api/v1/notify-channels", func(w http.ResponseWriter, _ *http.Request) {
+		list, err := st.ListNotifyChannels()
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
+	})
+	mux.HandleFunc("POST /api/v1/notify-channels", guard(authz.ScopeDanger, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Kind     string `json:"kind"`
+			Config   string `json:"config"`
+			MinLevel string `json:"min_level"`
+			Enabled  *bool  `json:"enabled"` // 未传 = 默认启用；显式 false 才停用
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil || req.Kind == "" {
+			apiErr(w, 400, 66000, "kind required (webhook/wecom/smtp)")
+			return
+		}
+		if req.MinLevel == "" {
+			req.MinLevel = "warn"
+		}
+		enabled := true
+		if req.Enabled != nil {
+			enabled = *req.Enabled
+		}
+		id, err := st.UpsertNotifyChannel(store.NotifyChannel{
+			Kind: req.Kind, Config: req.Config, MinLevel: req.MinLevel, Enabled: enabled,
+		})
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"id": id})
+		w.WriteHeader(http.StatusCreated)
 	}))
 
 	// M1 调度测试钩子

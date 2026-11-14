@@ -506,6 +506,24 @@ func (s *Store) HasAnyAdminToken() (bool, error) {
 	return n > 0, err
 }
 
+// ── 孵化器注册令牌（§6.4.16 rotate-token 吊销/轮换）──
+
+// IncubatorTokenHashByName 按孵化器名查独立注册令牌哈希（空 = 未设置）
+func (s *Store) IncubatorTokenHashByName(name string) (string, error) {
+	var h string
+	err := s.db.QueryRow(`SELECT COALESCE(registration_token_hash,'') FROM incubators WHERE name=?`, name).Scan(&h)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return h, err
+}
+
+// SetIncubatorTokenHash 轮换/吊销（空串 = 清除独立令牌）
+func (s *Store) SetIncubatorTokenHash(id, hash string) error {
+	_, err := s.db.Exec(`UPDATE incubators SET registration_token_hash=? WHERE id=?`, hash, id)
+	return err
+}
+
 // ── 通知渠道（§6.4.17 C9）──────────────────────
 
 type NotifyChannel struct {

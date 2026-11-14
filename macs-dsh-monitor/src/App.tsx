@@ -5,11 +5,14 @@ import React, { useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import {
   AdaptersView,
+  ArchivesView,
   ClusterView,
+  CostView,
   DispatchView,
   HistoryView,
   OverviewView,
   PlatformsView,
+  QualityView,
   TasksView,
   TelemetryView,
 } from './views.js';
@@ -27,6 +30,9 @@ const VIEWS = [
   { key: '7', name: '任务', render: () => <TasksView /> },
   { key: '8', name: '任务透视', render: () => <TaskBlueprintView /> },
   { key: '9', name: '历史记录', render: () => <HistoryView /> },
+  { key: 'a', name: '审批/质量', render: () => <QualityView /> },
+  { key: 'c', name: '成本', render: () => <CostView /> },
+  { key: 'd', name: '归档', render: () => <ArchivesView /> },
 ] as const;
 
 export function App() {

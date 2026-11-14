@@ -35,6 +35,11 @@ export const api = {
   taskWorkers: (id: string) => getList<Record<string, unknown>>(`/api/v1/tasks/${id}/workers`),
   taskEvents: (id: string, limit = 20) =>
     getList<Record<string, unknown>>(`/api/v1/tasks/${id}/events?limit=${limit}`),
+  // M3~M5 三平面扩展（与 macs-tower-web 同源端点）
+  approvals: () => getList<Record<string, unknown>>('/api/v1/approvals'),
+  spotChecks: () => getList<Record<string, unknown>>('/api/v1/spot-checks'),
+  costsSummary: () => get<{ data: unknown[]; global_cents: number }>('/api/v1/costs/summary'),
+  documents: () => getList<Record<string, unknown>>('/api/v1/documents'),
 };
 
 export interface DagNode {

@@ -294,6 +294,29 @@ func (d *Dispatcher) DispatchBroadcast(ctx context.Context, candidates []*store.
 	}
 }
 
+// StartJanitor ACK 兜底扫描（6.5 ackRetransmitTick）：塔重启后卡在 sent/retransmitted 的行标记 failed（E13），
+// 其子任务若仍处 dispatched 则回池 pending（保留重试计数），由编排器 2s tick 重派。
+// 迟到的执行结果由 HandleResult 幂等吸收（终态重复回传不重复生效）。
+func (d *Dispatcher) StartJanitor() {
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			cutoff := time.Now().UTC().Add(-2 * ackTotalWindow).Format(time.RFC3339)
+			rows, err := d.store.ListStuckDispatchRows(cutoff)
+			if err != nil {
+				continue
+			}
+			for _, r := range rows {
+				d.store.SetDispatchAck(r.MsgID, "failed")
+				if sub, err := d.store.GetSubtask(r.SubtaskID); err == nil && sub.Status == "dispatched" {
+					_ = d.store.SetSubtaskStatus(r.SubtaskID, "pending", "")
+				}
+			}
+		}
+	}()
+}
+
 // Dispatch M1 调度测试钩子：选首台在线孵化器定向下发
 func (d *Dispatcher) Dispatch(ctx context.Context, subtaskID string, taskDef map[string]any) (string, error) {
 	list, err := d.store.ListIncubators(true)

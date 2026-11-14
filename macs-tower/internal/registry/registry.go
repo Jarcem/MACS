@@ -11,12 +11,13 @@ import (
 	"net"
 
 	"macs.local/tower/internal/store"
+	"macs.local/tower/internal/trace"
 	"macs.local/tower/internal/udp"
 )
 
 type Service struct {
 	store *store.Store
-	token string // 空 = 开发模式不校验
+	token string // 全局令牌（MACS_REGISTER_TOKEN）；空 = 开发模式
 }
 
 func New(st *store.Store, token string) *Service { return &Service{store: st, token: token} }
@@ -36,7 +37,16 @@ func (s *Service) Handle(env udp.Envelope, src *net.UDPAddr) ([]byte, error) {
 	if err := json.Unmarshal(env.Payload, &p); err != nil || p.Name == "" {
 		return nil, errors.New("malformed register payload")
 	}
-	if s.token != "" && p.Token != s.token {
+	// §6.4.16 令牌校验：全局 MACS_REGISTER_TOKEN 或该孵化器独立令牌（rotate-token 轮换产物）任一命中即放行；
+	// 双空 = 开发模式放行（Quickstart 兼容）
+	valid := (s.token == "" && p.Token == "") ||
+		(s.token != "" && p.Token == s.token)
+	if !valid && p.Token != "" {
+		if h, _ := s.store.IncubatorTokenHashByName(p.Name); h != "" && trace.HashHex(p.Token) == h {
+			valid = true
+		}
+	}
+	if !valid {
 		return nil, errors.New("register token mismatch") // 66100 口径（§6.4.15）
 	}
 	if p.Capacity <= 0 {
