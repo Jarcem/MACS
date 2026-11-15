@@ -551,7 +551,7 @@ macs/
 - ✅ **M6 统一 Agent 平台协议**：协议驱动注册与能力映射三表 + OpenAI/Anthropic 协议驱动（孵化器侧凭据注入 + usage 回填成本）+ 遥测事件（telemetry_events + SSE）
 - ✅ **M7 DSH 监控终端**：Ink TUI 只读监控（REST/SSE 数据源，对齐 Web 看板）
 - ✅ **M8 命令终端**：每终端独立密钥 + HMAC 签发（60s 时间窗防重放）+ 白名单执行 + 注册 ACK 重试 + 审计双写对账 + 密钥轮换（10 分钟双验）
-- 🟡 **M2.6 任务生命周期止血（进行中）**：已落地 `task_cancelled` 单播下行（在跑子任务 `worker_rollback`）+ 进程树终止（Unix 进程组 / Windows `taskkill /T /F`）+ 会话载体 Worker；**待做**：子任务租约与确定性 Watchdog、执行结果终态保护（`attempt_count + incubator_id` 条件更新）、在途强制取消与取消墓碑、SSE 命名事件 `telemetry.update`
+- ✅ **M2.6 任务生命周期止血**：子任务租约（mode 感知 lease_expires_at + 5s 确定性回收 + E01 退避回池）、per-kind 条件核销（attempt+incubator 匹配，E17 迟到结果不复活）、强制取消（全部在途/待执行 cancelled + 取消注册表墓碑持久化 + task_cancelled 单播 + 取消收尾全项）、SSE 命名事件（telemetry.update + Last-Event-ID 回放）
 - ⚙️ **后续迭代**：AI 语义拆解、TCP 兜底通道、模板市场、多租户（见主设计 §3.3 范围三态）
 
 **已知边界**（协议/数据面已就绪、特性未接线的部分；完整清单见

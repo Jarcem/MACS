@@ -526,7 +526,7 @@ macs/
 - ✅ **M6 Unified agent platform protocol**: platform/driver/adapter registry + OpenAI/Anthropic protocol drivers (credential injection on incubator side + usage backfill) + telemetry events (SSE)
 - ✅ **M7 DSH monitoring terminal**: Ink TUI read-only monitor (REST/SSE data source aligned with the web HUD)
 - ✅ **M8 Command terminal**: per-terminal keys + HMAC-signed issuance (60s replay window) + allowlisted execution + register-ACK retry + audit reconciliation + secret rotation
-- 🟡 **M2.6 Task-lifecycle stopgap (in progress)**: landed `task_cancelled` unicast downlink (rolls back running subtasks) + process-tree termination (Unix process group / Windows `taskkill /T /F`) + session-carrier workers; **remaining**: subtask leases and deterministic watchdog, terminal-state protection (`attempt_count + incubator_id` conditional update), forced in-flight cancellation with tombstones, and the named SSE event `telemetry.update`
+- ✅ **M2.6 Task-lifecycle stopgap**: subtask leases (mode-aware lease_expires_at + 5s deterministic recovery + E01 backoff requeue), per-kind conditional finalization (attempt+incubator match, E17 late-result no-resurrect), forced cancellation (all in-flight/pending cancelled + cancel registry durable tombstones + task_cancelled unicast + full closing semantics), named SSE events (telemetry.update + Last-Event-ID replay)
 - ⚪ PostgreSQL production rollout + multi-tower federation
 
 **Known boundaries** (protocol/data plane ready, feature wiring pending; full list in
