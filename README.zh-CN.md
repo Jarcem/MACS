@@ -435,6 +435,7 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 | `MACS_AGENT_ALLOW`          | 空（全拒）                  | CLI 可执行文件白名单，逗号分隔           |
 | `MACS_ALLOW_SESSION_AGENT`  | 空（关闭）                  | 设为 `1` 启用会话载体模式（session_agent）|
 | `MACS_MAX_TOKENS_CAP`       | `8192`                      | LLM 单次请求 token 硬顶（有界上下文护栏） |
+| `MACS_PLUGINS_ENABLED`      | 空（关闭）                  | 设为 `1` 启用插件化适配器加载（模块 #29） |
 | `MACS_OPENAI_API_KEY`       | 空                          | OpenAI 兼容协议驱动凭据（不上塔）        |
 | `MACS_OPENAI_BASE_URL`      | `https://api.openai.com/v1` | 兼容网关地址（可接第三方）               |
 | `MACS_OPENAI_MODEL`         | 空                          | 默认模型（任务可按步覆盖）               |
@@ -559,15 +560,18 @@ macs/
 
 - 6.4.10 护栏：唤醒环冻结 / done 验收门 / 断路器 / 有界上下文 / Worker TTL 看门狗已实现；空闲下岗由 TTL 看门狗等价覆盖
 - **会话载体 Worker 已实现**：zcode / trae / DeepSeek Harness / claude code / codex 作为持久载体，子 Worker 在同一 session 内连续孵化（任务级 carrier 亲和）；进程树终止（Unix 进程组 / Windows taskkill /T /F）落地
+- **插件化适配器加载已实现（模块 #29）**：Manifest 校验 + JSON-RPC 子进程隔离 + 崩溃监控 + 能力门控 + 热重载（plugins.enabled 默认关）
+- **丢包模拟已验证**：5%/20%/50% 三档下 E16 广播仲裁收敛（唯一承接者不变）
+- **fetch_request 分片传输已就绪**：FragmentBuffer 重组器 + MsgFetchResponse 常量（当前产物 <256KB 未启用分片）
 - **M2.6 任务生命周期已实现**：子任务租约（lease_expires_at + 5s 确定性回收）、执行结果条件核销（attempt+incubator 匹配，E17 迟到结果不复活）、强制取消（全部在途/待执行 cancelled + 取消注册表 + task_cancelled 单播）、SSE 命名事件（telemetry.update）
 - 下行指令 `task_cancelled` / `approval_result` / `template_updated` / `budget_changed` 已接线；`task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` 协议常量就绪待适用
-- M2.6 未闭环项：子任务无 `lease_expires_at` 租约（仅靠全局 TTL 兜底，孵化器崩溃会卡在 `dispatched/running`）；`FinishSubtask` 未做 `attempt_count + incubator_id` 条件更新（旧 attempt 迟到结果可覆盖）；取消在途子任务仍 fail-open（无取消墓碑）；SSE 事件名为默认 `message`，DSH 插件监听的 `telemetry.update` 收不到
+- ~~M2.6 未闭环项~~ → **已全部闭环（V3.5.10）**：lease_expires_at 租约 + FinishSubtaskAttempt/FinishReviewAttempt 条件核销 + 取消墓碑持久化 + SSE 命名事件
 - 已知测试缺陷：`macs-incubator` 的 `TestSessionDriverLifecycle` 使用 bash 脚本伪工具，在 Windows 下失败（测试可移植性问题，需按平台改写）
-- 6.4.11 预算：任务级/全局/孵化器级已强制（月度窗口 + budget_changed 下行）；模板级待模板↔派发绑定打通
+- 6.4.11 预算：任务级/全局/孵化器级/**模板级**已强制（月度窗口 + budget_changed 下行 + 选机过滤）
 - 6.5 定时任务：超时检测/ACK 兜底/再平衡/Worker TTL/抽查重试/预算月度重置/资源快照清理已实现
 - `fetch_request` 大内容分片传输：协议就绪，当前产物均 <256KB 未启用
 - 孵化器本地 §3.7 自检/复核报告表（报告嵌入 `execution_result` 载荷 + 塔侧归档）
-- PostgreSQL 正式落地（SQLite 单库 + `DATABASE_URL` 预留）、多塔联邦、AI 语义拆解、模板市场、插件化加载（§3.3 后续迭代）
+- PostgreSQL 正式落地（SQLite 单库 + `DATABASE_URL` 预留）、多塔联邦、AI 语义拆解、模板市场（§3.3 后续迭代）
 - ⚪ PostgreSQL 正式落地 + 多塔联邦
 
 <br/>

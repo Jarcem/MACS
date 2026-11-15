@@ -411,6 +411,7 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 | `MACS_AGENT_ALLOW`         | empty (deny all)            | CLI executable allowlist, comma-separated          |
 | `MACS_ALLOW_SESSION_AGENT` | empty (off)                 | Set to `1` to enable session-carrier mode (`session_agent`) |
 | `MACS_MAX_TOKENS_CAP`      | `8192`                      | Hard cap on LLM tokens per request (bounded-context guard) |
+| `MACS_PLUGINS_ENABLED`      | empty (off)                 | Set to `1` to enable plugin adapter loading (module #29) |
 | `MACS_OPENAI_API_KEY`      | empty                       | OpenAI-compatible protocol driver credential (never sent to tower) |
 | `MACS_OPENAI_BASE_URL`     | `https://api.openai.com/v1` | Compatible gateway URL (third-party OK)            |
 | `MACS_OPENAI_MODEL`        | empty                       | Default model (per-step override supported)        |
@@ -534,11 +535,14 @@ macs/
 
 - 6.4.10 guardrails live: wake-loop freeze, done acceptance gate, circuit breaker, bounded context (LLM max-token cap), worker TTL watchdog
 - **Session-carrier workers implemented**: zcode / trae / DeepSeek Harness / claude code / codex as persistent carriers — sub-workers incubate inside the same session (task-level carrier affinity); process-tree termination landed (Unix process group / Windows taskkill /T /F)
+- **Plugin adapter loading implemented (module #29)**: Manifest validation + JSON-RPC subprocess isolation + crash monitoring + capability gating + hot reload (plugins.enabled default off)
+- **Packet loss simulation verified**: E16 broadcast arbitration converges at 5%/20%/50% loss rates (single winner invariant)
+- **fetch_request chunked transfer ready**: FragmentBuffer reassembler + MsgFetchResponse constant (current artifacts <256KB, not yet wired)
 - **M2.6 task lifecycle implemented**: subtask leases (lease_expires_at + 5s deterministic recovery), conditional result finalization (attempt+incubator match, E17 late-result no-resurrect), forced cancellation (all in-flight/pending cancelled + cancel registry + task_cancelled unicast), named SSE events (telemetry.update)
 - Downlink wired: `task_cancelled` (rollback running workers) / `approval_result` / `template_updated` / `budget_changed`; `task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` constants ready, wire on demand
 - M2.6 gaps: no `lease_expires_at` subtask lease (only the global TTL watchdog; an incubator crash leaves subtasks stuck in `dispatched/running`); `FinishSubtask` has no `attempt_count + incubator_id` guard (a late old-attempt result can overwrite); cancelling in-flight subtasks is still fail-open (no tombstone); SSE frames use the default `message` event, so the DSH plugin's `telemetry.update` listener receives nothing
 - Known test defect: `macs-incubator` `TestSessionDriverLifecycle` uses a bash-script fake agent and fails on Windows (test portability; needs a per-platform rewrite)
-- 6.4.11 budgets enforced: task / global / incubator level (monthly window + budget_changed downlink); template level pending template-dispatch binding
+- 6.4.11 budgets enforced: task / global / incubator / **template** level (monthly window + budget_changed downlink + dispatch filter)
 - 6.5 timers live: stale detection, ACK janitor, rebalance, worker TTL, spot-check retry, monthly budget reset, resource-snapshot cleanup
 - `fetch_request` large-content chunked transfer: protocol ready, unused while artifacts stay <256KB
 - Local §3.7 self-check/review report tables (reports ride inside `execution_result` payload + tower-side archive)
