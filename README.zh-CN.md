@@ -118,8 +118,8 @@ Ink TUI 只读终端，内容对齐 Web 看板，适合放在透明显示设备�
 注册、下发、ACK、执行结果、命令执行逐条落库/落 JSONL，可回溯每一次决策。
 </td>
 <td align="center">
-<h3>🧠 自带 Agent</h3>
-执行单元可替换：内置文本分析、本机 CLI Agent（argv 直启）、HTTP Agent、OpenAI / Anthropic 协议驱动（凭据仅存孵化器本机）。
+<h3>🧠 会话载体 Agent</h3>
+终端 Agent 作为持久载体：zcode / trae / DeepSeek Harness / claude code / codex 的 <strong>session 内连续孵化子 Worker</strong>（上下文累积）；另有本机 CLI（argv 直启）、HTTP Agent、OpenAI / Anthropic 协议驱动（凭据仅存孵化器本机）。
 </td>
 </tr>
 </table>
@@ -312,6 +312,32 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks `
 
 > Bash 等价写法：把 `$env:VAR='v'` 换成 `VAR=v ./bin/xxx` 即可。
 
+### 会话载体模式（终端 Agent 持久载体）
+
+让 zcode / trae / DeepSeek Harness / claude code / codex 作为**持久 Worker 载体**——同一任务的子 Worker 在工具的同一 session 内连续孵化，Agent 记得之前做过什么（上下文累积、多轮协作）：
+
+```bash
+# 孵化器开闸（默认关）
+MACS_ALLOW_SESSION_AGENT=1
+```
+
+```json
+"plan": [
+  {"mode":"session_agent","session":{"driver":"claude"},
+   "text":"分析这个仓库的登录模块，列出问题清单"},
+  {"mode":"session_agent","session":{"driver":"claude"},
+   "text":"修复第 1、2 项","depends_on":[0]},
+  {"mode":"session_agent","session":{"driver":"claude"},
+   "text":"跑测试验证修复","depends_on":[1]}
+]
+```
+
+- **claude 预设**：`-p` / `--output-format json` / `--resume` 自动装配
+- **generic 模板驱动**（zcode / dsh / trae）：显式 `start_args` / `resume_args`，
+  `{{text}}` / `{{deps}}` / `{{session}}` 占位；会话 id 经 JSON `session_id_path` 提取
+- **载体亲和**：同任务子 Worker 钉在首台孵化器的同一 session；载体离线自动回退新会话
+- **进程树终止**：超时/取消时 Agent 内部 spawn 的子进程一并清理（Unix 进程组 / Windows taskkill /T /F）
+
 ### 本地开发脚本（启动/停止）
 
 冒烟与联调建议使用安全脚本，避免手工清理进程：
@@ -407,6 +433,8 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 | `MACS_INCUBATOR_TOKEN`      | 空                          | 注册令牌                                 |
 | `MACS_ALLOW_CLI_AGENT`      | 空（关闭）                  | 设为 `1` 才允许 `cli_agent`              |
 | `MACS_AGENT_ALLOW`          | 空（全拒）                  | CLI 可执行文件白名单，逗号分隔           |
+| `MACS_ALLOW_SESSION_AGENT`  | 空（关闭）                  | 设为 `1` 启用会话载体模式（session_agent）|
+| `MACS_MAX_TOKENS_CAP`       | `8192`                      | LLM 单次请求 token 硬顶（有界上下文护栏） |
 | `MACS_OPENAI_API_KEY`       | 空                          | OpenAI 兼容协议驱动凭据（不上塔）        |
 | `MACS_OPENAI_BASE_URL`      | `https://api.openai.com/v1` | 兼容网关地址（可接第三方）               |
 | `MACS_OPENAI_MODEL`         | 空                          | 默认模型（任务可按步覆盖）               |

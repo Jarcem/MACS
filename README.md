@@ -409,6 +409,8 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 | `MACS_INCUBATOR_TOKEN`     | empty                       | Registration token                                 |
 | `MACS_ALLOW_CLI_AGENT`     | empty (off)                 | Set to `1` to enable `cli_agent`                   |
 | `MACS_AGENT_ALLOW`         | empty (deny all)            | CLI executable allowlist, comma-separated          |
+| `MACS_ALLOW_SESSION_AGENT` | empty (off)                 | Set to `1` to enable session-carrier mode (`session_agent`) |
+| `MACS_MAX_TOKENS_CAP`      | `8192`                      | Hard cap on LLM tokens per request (bounded-context guard) |
 | `MACS_OPENAI_API_KEY`      | empty                       | OpenAI-compatible protocol driver credential (never sent to tower) |
 | `MACS_OPENAI_BASE_URL`     | `https://api.openai.com/v1` | Compatible gateway URL (third-party OK)            |
 | `MACS_OPENAI_MODEL`        | empty                       | Default model (per-step override supported)        |
