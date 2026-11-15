@@ -392,6 +392,10 @@ func (o *Orchestrator) HandleResult(r Result) {
 		if r.SessionID != "" {
 			_ = o.st.SetTaskCarrier(sub.TaskID, r.IncubatorID, r.SessionID)
 		}
+		// 模板级月度预算累计（6.4.11：模板级 spent_monthly_cents）
+		if sub.TemplateID != "" && r.Telemetry != nil && r.Telemetry.CostCents > 0 {
+			_ = o.st.IncTemplateMonthlySpend(sub.TemplateID, r.Telemetry.CostCents)
+		}
 	}
 
 	// 成本与遥测（FR-21 / §6.4.13.4）
@@ -875,6 +879,12 @@ func (o *Orchestrator) selectIncubators(incs []store.Incubator, running map[stri
 		}
 		if o.budgetSuspendedFor(inc.ID) {
 			continue
+		}
+		// 模板级月度预算超限 → 该模板的子任务不派发（6.4.11）
+		if s.TemplateID != "" {
+			if exceeded, _ := o.st.TemplateBudgetExceeded(s.TemplateID); exceeded {
+				continue
+			}
 		}
 		idleScore := float64(slots) / float64(max(1, inc.Capacity))
 		loadScore := 1.0 - clamp(inc.LastLoad, 0, 1)

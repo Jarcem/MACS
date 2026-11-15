@@ -6,6 +6,8 @@ package store
 
 import (
 	"database/sql"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -444,6 +446,62 @@ func (s *Store) ListTelemetryEvents(taskID, subtaskID, eventType string, limit i
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// ── 大内容分片重组缓冲（§6.2.7 fetch_response）──
+
+// FragmentBuffer 分片重组器（msg_id → chunks）
+type FragmentBuffer struct {
+	mu       sync.Mutex
+	chunks   map[string]map[int]string
+	total    map[string]int
+	deadline map[string]time.Time
+}
+
+func NewFragmentBuffer() *FragmentBuffer {
+	return &FragmentBuffer{
+		chunks:   map[string]map[int]string{},
+		total:    map[string]int{},
+		deadline: map[string]time.Time{},
+	}
+}
+
+// Add 存入分片；全部到齐时返回重组结果
+func (f *FragmentBuffer) Add(msgID string, chunkIndex, chunkTotal int, data string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.chunks[msgID]; !ok {
+		f.chunks[msgID] = map[int]string{}
+		f.total[msgID] = chunkTotal
+		f.deadline[msgID] = time.Now().Add(60 * time.Second) // 60s 超时清理
+	}
+	f.chunks[msgID][chunkIndex] = data
+	if len(f.chunks[msgID]) < chunkTotal {
+		return "", false
+	}
+	// 重组
+	var parts []string
+	for i := 0; i < chunkTotal; i++ {
+		parts = append(parts, f.chunks[msgID][i])
+	}
+	delete(f.chunks, msgID)
+	delete(f.total, msgID)
+	delete(f.deadline, msgID)
+	return strings.Join(parts, ""), true
+}
+
+// PurgeStale 清理超时未完成的分片（60s 超时）
+func (f *FragmentBuffer) PurgeStale() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	for id, dl := range f.deadline {
+		if now.After(dl) {
+			delete(f.chunks, id)
+			delete(f.total, id)
+			delete(f.deadline, id)
+		}
+	}
 }
 
 // ── 孵化器资源快照（§2.1 incubator_resources）──

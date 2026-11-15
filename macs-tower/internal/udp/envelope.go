@@ -40,6 +40,7 @@ const (
 	MsgTemplateUpdated     = "template_updated" // 6.4.3：Agent 模板更新
 	MsgSpotCheckRequest    = "spot_check_request" // 6.4.3：抽查请求
 	MsgMergeInstruction    = "merge_instruction"  // 6.4.3：合并指令
+	MsgFetchResponse       = "fetch_response"     // §6.2.7：大内容分片回传
 	MsgWorkerSpawn         = "worker_spawn"
 	MsgWorkerRollback      = "worker_rollback"
 	MsgBudgetChanged       = "budget_changed"

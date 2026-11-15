@@ -589,6 +589,27 @@ func (s *Store) FinishSubtask(id, status, result, errMsg, workerID, startedAt, f
 	return err
 }
 
+// IncTemplateMonthlySpend 累计模板月度消耗（6.4.11 模板级预算）
+func (s *Store) IncTemplateMonthlySpend(templateID string, amountCents float64) error {
+	_, err := s.db.Exec(`UPDATE agent_templates SET spent_monthly_cents = spent_monthly_cents + ?
+		WHERE id=?`, amountCents, templateID)
+	return err
+}
+
+// TemplateBudgetExceeded 模板月度预算是否超限（6.4.11；0 = 不限）
+func (s *Store) TemplateBudgetExceeded(templateID string) (bool, error) {
+	var spent, budget float64
+	err := s.db.QueryRow(`SELECT COALESCE(spent_monthly_cents,0), COALESCE(monthly_budget_cents,0)
+		FROM agent_templates WHERE id=?`, templateID).Scan(&spent, &budget)
+	if err != nil {
+		return false, err // 模板不存在 = 不限
+	}
+	if budget <= 0 {
+		return false, nil
+	}
+	return spent >= budget, nil
+}
+
 // SetSubtaskFingerprint 产物指纹落库（条件核销后塔侧权威回填，6.4.4）
 func (s *Store) SetSubtaskFingerprint(id, fp string) error {
 	_, err := s.db.Exec(`UPDATE subtasks SET fingerprint=?, updated_at=? WHERE id=?`, fp, now(), id)
