@@ -171,8 +171,21 @@ func (s *Store) BumpDispatchRetransmit(msgID string) {
 		now(), msgID)
 }
 
+// SetDispatchAck 更新下发状态。终态保护（6.4.8 首确认口径）：
+//   - acked/failed 为终态，duplicate（后到 ACK）不得降级——dispatch_log 保留首确认
+//   - duplicate 单独走 SetDispatchDuplicate（仅非终态时记账）
 func (s *Store) SetDispatchAck(msgID, status string) {
+	if status == "duplicate" {
+		s.SetDispatchDuplicate(msgID)
+		return
+	}
 	_, _ = s.db.Exec(`UPDATE dispatch_log SET ack_status=?, acked_at=? WHERE msg_id=?`, status, now(), msgID)
+}
+
+// SetDispatchDuplicate 后到 ACK 记账：不覆盖 acked/failed 终态（E16 首确认口径）
+func (s *Store) SetDispatchDuplicate(msgID string) {
+	_, _ = s.db.Exec(`UPDATE dispatch_log SET ack_status='duplicate'
+		WHERE msg_id=? AND ack_status NOT IN ('acked','failed')`, msgID)
 }
 
 // StuckDispatchRow 塔重启后卡在下发中的行（E13 兜底）

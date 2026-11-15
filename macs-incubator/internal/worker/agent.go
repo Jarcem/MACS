@@ -48,6 +48,24 @@ func timeoutOf(ms int64) time.Duration {
 	return d
 }
 
+// runWithTree 进程树安全执行：Start → 监听 ctx → 超时/回滚时整组终止（M2.6 §6.4.3.3）→ Wait
+func runWithTree(ctx context.Context, cmd *exec.Cmd) error {
+	setPgid(cmd)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		killTree(cmd.Process.Pid)
+		<-done // 等待内核回收，避免僵尸
+		return ctx.Err()
+	}
+}
+
 // limitBuffer 边写边截断，同时记录丢弃量
 type limitBuffer struct {
 	buf   bytes.Buffer
@@ -138,7 +156,7 @@ func runCLI(ctx context.Context, j Job) Outcome {
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 
 	start := time.Now()
-	runErr := cmd.Run()
+	runErr := runWithTree(runCtx, cmd) // 进程组终止：超时/取消时 Agent 内部子进程一并清理（M2.6）
 	code := -1
 	if cmd.ProcessState != nil {
 		code = cmd.ProcessState.ExitCode()

@@ -62,6 +62,12 @@ func newMsgID() string {
 // localDrivers 能力协商（§6.4.13.6）：按本机 env 装配 协议驱动@版本 列表
 func localDrivers() []string {
 	drivers := []string{"cli-native-protocol@1.0"}
+	if os.Getenv("MACS_ALLOW_CLI_AGENT") == "1" {
+		drivers = append(drivers, "cli_agent@1.0")
+	}
+	if os.Getenv("MACS_ALLOW_SESSION_AGENT") == "1" {
+		drivers = append(drivers, "session_agent@1.0")
+	}
 	if os.Getenv("MACS_OPENAI_API_KEY") != "" {
 		drivers = append(drivers, "openai_compatible@1")
 	}
@@ -235,6 +241,16 @@ func main() {
 			"status":    out.Status, "result": out.Result, "error": out.Error,
 			"started_at": out.StartedAt, "finished_at": out.FinishedAt, "duration_ms": out.DurationMs,
 			"fingerprint": fp, "self_check": selfCheck,
+		}
+		// 会话载体：session_id 回执 → 塔侧 carrier 亲和（同任务后续子 Worker 在同一 session 孵化）
+		if job.Session != nil {
+			var sr struct {
+				SessionID string `json:"session_id"`
+			}
+			if json.Unmarshal([]byte(out.Result), &sr) == nil && sr.SessionID != "" {
+				payload["session_id"] = sr.SessionID
+				payload["worker_id"] = fmt.Sprintf("%s/session:%s", name, sr.SessionID)
+			}
 		}
 		// LLM 模式：usage 从结果 JSON 提取 → 遥测回填 cost_records（6.4.9）
 		if job.Mode == "openai_compatible" || job.Mode == "anthropic" {

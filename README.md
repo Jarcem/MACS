@@ -530,6 +530,7 @@ macs/
 [design/设计实现对照表.md](design/设计实现对照表.md)):
 
 - 6.4.10 guardrails live: wake-loop freeze, done acceptance gate, circuit breaker, bounded context (LLM max-token cap), worker TTL watchdog
+- **Session-carrier workers implemented**: zcode / trae / DeepSeek Harness / claude code / codex as persistent carriers — sub-workers incubate inside the same session (task-level carrier affinity); process-tree termination landed (Unix process group / Windows taskkill /T /F)
 - Downlink wired: `task_cancelled` (rollback running workers) / `approval_result` / `template_updated` / `budget_changed`; `task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` constants ready, wire on demand
 - 6.4.11 budgets enforced: task / global / incubator level (monthly window + budget_changed downlink); template level pending template-dispatch binding
 - 6.5 timers live: stale detection, ACK janitor, rebalance, worker TTL, spot-check retry, monthly budget reset, resource-snapshot cleanup

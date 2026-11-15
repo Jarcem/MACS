@@ -55,6 +55,10 @@ func maxTokensCap() int {
 
 // runLLM 统一驱动执行：构造请求 → 2xx 取 content → usage 随结果回传
 func runLLM(ctx context.Context, j Job, d llmDriver) Outcome {
+	// 有界上下文护栏（6.4.10）：先于凭据检查——护栏优先
+	if cap := maxTokensCap(); j.MaxTokens > cap {
+		return failOutcome("bounded_context: max_tokens %d exceeds incubator cap %d (6.4.10)", j.MaxTokens, cap)
+	}
 	baseURL, apiKey, defaultModel, ok := d.endpoint()
 	if !ok {
 		return failOutcome("%s: credentials not configured on incubator (see env)", d.name)
@@ -65,9 +69,6 @@ func runLLM(ctx context.Context, j Job, d llmDriver) Outcome {
 	}
 	if model == "" {
 		return failOutcome("%s: model required (job.model or env)", d.name)
-	}
-	if cap := maxTokensCap(); j.MaxTokens > cap {
-		return failOutcome("bounded_context: max_tokens %d exceeds incubator cap %d (6.4.10)", j.MaxTokens, cap)
 	}
 
 	req, err := d.buildReq(j, baseURL, apiKey, model)

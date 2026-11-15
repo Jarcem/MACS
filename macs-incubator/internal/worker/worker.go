@@ -52,6 +52,10 @@ type Job struct {
 	ReviewJob     json.RawMessage `json:"review_job"`
 	ReviewExpect  string          `json:"review_expect"`
 	ReviewRound   int             `json:"review_round"`
+
+	// 会话载体模式（§6.4.9 CLI Native 扩展）：终端 Agent 工具作为持久载体，
+	// 子 Worker 在同一 session 内连续孵化（上下文累积）
+	Session *SessionSpec `json:"session,omitempty"`
 }
 
 type Outcome struct {
@@ -104,6 +108,8 @@ func RunWithContext(ctx context.Context, j Job) Outcome {
 		}
 	case "review":
 		out = runReview(j)
+	case "session_agent":
+		out = runSession(ctx, j)
 	default:
 		out.Status = "failed"
 		out.Error = fmt.Sprintf("unsupported mode: %s", j.Mode)

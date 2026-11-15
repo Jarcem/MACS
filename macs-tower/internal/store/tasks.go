@@ -30,17 +30,19 @@ type Task struct {
 	AcceptNote  string `json:"acceptance_design_note"`
 	DeadlineAt  string `json:"deadline_at"`
 	BudgetCents float64 `json:"budget_cents"`
+	CarrierIncubator string `json:"carrier_incubator"` // 会话载体亲和：首次执行的孵化器
+	CarrierSession   string `json:"carrier_session"`   // 会话 id（同任务后续子 Worker 在同一 session 孵化）
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 }
 
 // taskCols 任务列清单（新增列追加尾部，向前兼容；与 scanTask 一一对应）
-const taskCols = `id,goal,title,status,progress,priority,acceptance_criteria,acceptance_design_note,COALESCE(deadline_at,''),budget_cents,created_at,updated_at`
+const taskCols = `id,goal,title,status,progress,priority,acceptance_criteria,acceptance_design_note,COALESCE(deadline_at,''),budget_cents,COALESCE(carrier_incubator,''),COALESCE(carrier_session,''),created_at,updated_at`
 
 func scanTask(rows interface{ Scan(...any) error }) (Task, error) {
 	var t Task
 	err := rows.Scan(&t.ID, &t.Goal, &t.Title, &t.Status, &t.Progress, &t.Priority, &t.Acceptance,
-		&t.AcceptNote, &t.DeadlineAt, &t.BudgetCents, &t.CreatedAt, &t.UpdatedAt)
+		&t.AcceptNote, &t.DeadlineAt, &t.BudgetCents, &t.CarrierIncubator, &t.CarrierSession, &t.CreatedAt, &t.UpdatedAt)
 	return t, err
 }
 
@@ -149,10 +151,10 @@ func (s *Store) InsertTaskWithSubtasks(t Task, subs []Subtask) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO tasks(id,goal,title,status,progress,priority,acceptance_criteria,acceptance_design_note,deadline_at,budget_cents,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := tx.Exec(`INSERT INTO tasks(id,goal,title,status,progress,priority,acceptance_criteria,acceptance_design_note,deadline_at,budget_cents,carrier_incubator,carrier_session,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Goal, t.Title, t.Status, t.Progress, t.Priority, t.Acceptance, t.AcceptNote, t.DeadlineAt,
-		t.BudgetCents, t.CreatedAt, t.UpdatedAt); err != nil {
+		t.BudgetCents, t.CarrierIncubator, t.CarrierSession, t.CreatedAt, t.UpdatedAt); err != nil {
 		return err
 	}
 	stmt, err := tx.Prepare(`INSERT INTO subtasks(id,task_id,seq,title,payload,depends_on,status,kind,review_of,attempt_count,
@@ -319,6 +321,14 @@ func (s *Store) CountIncubatorResources() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(1) FROM incubator_resources`).Scan(&n)
 	return n, err
+}
+
+// SetTaskCarrier 会话载体登记（幂等：仅首次生效；载体锁定后同任务子 Worker 在同一 session 孵化）
+func (s *Store) SetTaskCarrier(taskID, incubatorID, sessionID string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET carrier_incubator=?, carrier_session=?
+		WHERE id=? AND (carrier_incubator='' OR carrier_incubator IS NULL)`,
+		incubatorID, sessionID, taskID)
+	return err
 }
 
 // SetTaskStatus 直接推进任务状态（blocked/cancelled 等非聚合态）

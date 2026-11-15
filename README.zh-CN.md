@@ -529,6 +529,7 @@ macs/
 [design/设计实现对照表.md](design/设计实现对照表.md)）：
 
 - 6.4.10 护栏：唤醒环冻结 / done 验收门 / 断路器 / 有界上下文 / Worker TTL 看门狗已实现；空闲下岗由 TTL 看门狗等价覆盖
+- **会话载体 Worker 已实现**：zcode / trae / DeepSeek Harness / claude code / codex 作为持久载体，子 Worker 在同一 session 内连续孵化（任务级 carrier 亲和）；进程树终止（Unix 进程组 / Windows taskkill /T /F）落地
 - 下行指令 `task_cancelled` / `approval_result` / `template_updated` / `budget_changed` 已接线；`task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` 协议常量就绪待适用
 - 6.4.11 预算：任务级/全局/孵化器级已强制（月度窗口 + budget_changed 下行）；模板级待模板↔派发绑定打通
 - 6.5 定时任务：超时检测/ACK 兜底/再平衡/Worker TTL/抽查重试/预算月度重置/资源快照清理已实现

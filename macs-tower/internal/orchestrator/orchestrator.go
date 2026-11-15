@@ -53,8 +53,25 @@ type PlanStep struct {
 	System    string            `json:"system,omitempty"`
 	MaxTokens int               `json:"max_tokens,omitempty"`
 
+	// 会话载体（§6.4.9 CLI Native 扩展）：标记后该步骤在终端 Agent 工具的
+	// 同一 session 内执行，子 Worker 于 session 中连续孵化（上下文累积）
+	Session *SessionSpec `json:"session,omitempty"`
+
 	TimeoutMs int64  `json:"timeout_ms,omitempty"`
 	DependsOn []int  `json:"depends_on,omitempty"`
+}
+
+// SessionSpec 会话载体规格（透传给孵化器；driver=claude 有预设，其余 generic 显式模板）
+type SessionSpec struct {
+	Driver        string   `json:"driver"`
+	Command       string   `json:"command,omitempty"`
+	StartArgs     []string `json:"start_args,omitempty"`
+	ResumeArgs    []string `json:"resume_args,omitempty"`
+	Output        string   `json:"output,omitempty"`
+	SessionIDPath string   `json:"session_id_path,omitempty"`
+	ResultPath    string   `json:"result_path,omitempty"`
+	Cwd           string   `json:"cwd,omitempty"`
+	TimeoutMs     int64    `json:"timeout_ms,omitempty"`
 }
 
 // Config 编排器配置（10.3 开关经 env 装配）
@@ -305,6 +322,7 @@ type Result struct {
 	StartedAt   string `json:"started_at"`
 	FinishedAt  string `json:"finished_at"`
 	Fingerprint string `json:"fingerprint"`
+	SessionID   string `json:"session_id"` // 会话载体回执（同任务后续子 Worker 在同一 session 孵化）
 	// §6.4.13.2 遥测扩展
 	Telemetry *udpTelemetry `json:"telemetry_metrics,omitempty"`
 }
@@ -365,6 +383,10 @@ func (o *Orchestrator) HandleResult(r Result) {
 	if status == "completed" {
 		summary := fmt.Sprintf("%.80s", r.Result)
 		_ = o.tr.Record(sub.TaskID, sub.ID, fp, summary, "result", int64(len(r.Result)))
+		// 会话载体登记（幂等：仅首次；后续子 Worker 在同一 session 孵化）
+		if r.SessionID != "" {
+			_ = o.st.SetTaskCarrier(sub.TaskID, r.IncubatorID, r.SessionID)
+		}
 	}
 
 	// 成本与遥测（FR-21 / §6.4.13.4）
@@ -731,6 +753,33 @@ func (o *Orchestrator) failSubtask(sub store.Subtask, reason string) {
 //   score = 0.45*idle_score + 0.35*load_score + template_bonus(0) + spread_penalty
 func (o *Orchestrator) selectIncubators(incs []store.Incubator, running map[string]int, s store.Subtask, taskID string) []*store.Incubator {
 	driver := requiredDriverOf(s)
+
+	// 会话载体亲和（V3.5.8）：任务已有 carrier → 只派给该孵化器（同 session 连续孵化）；
+	// 载体不可用（离线/熔断/预算暂停）时回退全选机——新节点新会话，塔侧将更新 carrier
+	var task store.Task
+	var hasTask bool
+	if o.st != nil {
+		var err error
+		task, err = o.st.GetTask(taskID)
+		hasTask = err == nil
+	}
+	if hasTask && task.CarrierIncubator != "" {
+		for i := range incs {
+			inc := &incs[i]
+			if inc.ID != task.CarrierIncubator || o.disp.CircuitOpen(inc.ID) || o.budgetSuspendedFor(inc.ID) {
+				continue
+			}
+			if driver != "" && !hasDriver(inc.Drivers, driver) {
+				continue
+			}
+			if inc.Capacity-running[inc.ID] <= 0 || inc.ListenPort <= 0 || inc.LastIP == "" {
+				continue
+			}
+			return []*store.Incubator{inc}
+		}
+		// 载体不可用 → 回退常规选机（新会话；HandleResult 将更新 carrier）
+	}
+
 	type scored struct {
 		inc   *store.Incubator
 		score float64
@@ -796,6 +845,8 @@ func requiredDriverOf(s store.Subtask) string {
 		return "openai_compatible"
 	case "anthropic":
 		return "anthropic"
+	case "session_agent":
+		return "session_agent"
 	}
 	return ""
 }
@@ -813,11 +864,18 @@ func hasDriver(driversJSON, driver string) bool {
 	return false
 }
 
-// taskDef 由子任务 payload 构造下发体；有依赖的子任务在分发时注入依赖结果
+// taskDef 由子任务 payload 构造下发体；有依赖的子任务注入依赖结果，
+// 会话载体步骤注入 resume（同任务 carrier session，§6.4.9 扩展）
 func (o *Orchestrator) taskDef(s store.Subtask) map[string]any {
 	var def map[string]any
 	if err := json.Unmarshal([]byte(s.Payload), &def); err != nil || def == nil {
 		return map[string]any{"mode": "noop"}
+	}
+	if task, err := o.st.GetTask(s.TaskID); err == nil && task.CarrierSession != "" {
+		if spec, ok := def["session"].(map[string]any); ok {
+			spec["resume"] = task.CarrierSession
+			def["session"] = spec
+		}
 	}
 	if s.DependsOn == "" {
 		return def
@@ -898,6 +956,20 @@ func validatePlan(plan []PlanStep) error {
 			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 				return fmt.Errorf("%w: plan[%d] valid http(s) url required", ErrBadPlan, i)
 			}
+		case "session_agent":
+			sp := plan[i].Session
+			if sp == nil {
+				return fmt.Errorf("%w: plan[%d] session spec required", ErrBadPlan, i)
+			}
+			switch sp.Driver {
+			case "claude":
+			case "generic":
+				if strings.TrimSpace(sp.Command) == "" || len(sp.StartArgs) == 0 {
+					return fmt.Errorf("%w: plan[%d] generic session requires command + start_args", ErrBadPlan, i)
+				}
+			default:
+				return fmt.Errorf("%w: plan[%d] unsupported session driver %q (claude|generic)", ErrBadPlan, i, sp.Driver)
+			}
 		case "text_analysis", "merge", "openai_compatible", "anthropic":
 			// 内置模式与协议驱动模式（6.4.9）：凭据由孵化器注入，不下发
 		default:
@@ -924,6 +996,14 @@ func buildPlanSubtasks(taskID, goal string, plan []PlanStep) []store.Subtask {
 		if strings.TrimSpace(step.Text) == "" {
 			step.Text = goal // 未显式指定时，占位符 {{text}} 用任务目标
 		}
+		if step.Session != nil {
+			if strings.TrimSpace(step.Mode) == "" {
+				step.Mode = "session_agent"
+			}
+			if step.Session.Driver == "" {
+				step.Session.Driver = "claude"
+			}
+		}
 		title := strings.TrimSpace(step.Title)
 		if title == "" {
 			title = fmt.Sprintf("步骤 %d · %s", i+1, modeLabel(step.Mode))
@@ -944,12 +1024,15 @@ func buildPlanSubtasks(taskID, goal string, plan []PlanStep) []store.Subtask {
 }
 
 // driverForMode mode → 孵化器能力协商键（§6.4.13.6）
+// （原函数见下方；session_agent 在此追加）
 func driverForMode(mode string) string {
 	switch mode {
 	case "openai_compatible":
 		return "openai_compatible"
 	case "anthropic":
 		return "anthropic"
+	case "session_agent":
+		return "session_agent"
 	}
 	return ""
 }

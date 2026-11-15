@@ -113,6 +113,7 @@ func TestBroadcastArbitrationSingleWinner(t *testing.T) {
 	rows, _ := st.ListDispatchLog(10)
 	acked := 0
 	for _, r := range rows {
+		t.Logf("dispatch_log: subtask=%s status=%s", r.SubtaskID, r.AckStatus)
 		if r.SubtaskID == "sub-arb" && r.AckStatus == "acked" {
 			acked++
 		}
