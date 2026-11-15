@@ -28,7 +28,7 @@ func TestLeaseRecoveryRetryPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 抢占（attempt=1，租约按 timeout_ms=0 → 120s+30s）
-	attempt, err := st.ClaimSubtaskLease("s-lease", "inc-1", 0)
+	attempt, err := st.ClaimSubtaskLease("s-lease", "inc-1", store.LeaseTimeoutFor("", 0))
 	if err != nil || attempt != 1 {
 		t.Fatalf("claim: attempt=%d err=%v", attempt, err)
 	}
@@ -42,9 +42,21 @@ func TestLeaseRecoveryRetryPath(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].Action != "retry" {
 		t.Fatalf("到期应 retry 回收: %v %v", got, err)
 	}
+	// V3.5.10 唯一记账口径：租约到期复用 E01 failed + next_retry_at 退避（不直接置 pending）
 	sub2, _ := st.GetSubtask("s-lease")
-	if sub2.Status != "pending" || sub2.IncubatorID != "" || sub2.Result != "" {
-		t.Errorf("retry 回收应清空载体/产物并回池: %+v", sub2)
+	if sub2.Status != "failed" || sub2.NextRetryAt == "" {
+		t.Errorf("retry 回收应为 failed + next_retry_at: %+v", sub2)
+	}
+	// RequeueRetryable 到期后回池
+	if _, err := st.Exec("UPDATE subtasks SET next_retry_at='2020-01-01T00:00:00Z' WHERE id='s-lease'"); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := st.RequeueRetryable(); n != 1 {
+		t.Errorf("退避到期应回池 1 条，got %d", n)
+	}
+	sub3, _ := st.GetSubtask("s-lease")
+	if sub3.Status != "pending" || sub3.IncubatorID != "" {
+		t.Errorf("回池后应 pending，got %+v", sub3)
 	}
 }
 
@@ -64,7 +76,7 @@ func TestLeaseRecoveryExhaustedPath(t *testing.T) {
 	if err := st.InsertTaskWithSubtasks(task, []store.Subtask{sub}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = st.ClaimSubtaskLease("s-lease2", "inc-1", 0); err != nil {
+	if _, err = st.ClaimSubtaskLease("s-lease2", "inc-1", store.LeaseTimeoutFor("", 0)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.RecoverExpiredLeases(time.Now().UTC().Add(200 * time.Second).Format(time.RFC3339))

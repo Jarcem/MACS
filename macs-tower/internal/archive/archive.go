@@ -81,6 +81,23 @@ func (s *Service) HandoffForSubtask(task store.Task, sub store.Subtask) error {
 	return s.st.InsertArchiveDoc(doc)
 }
 
+// CancelDoc 取消归档（M2.6 §6.4.3.3 取消收尾口径：document_type=cancel，不生成终审归档）
+func (s *Service) CancelDoc(task store.Task, subs []store.Subtask) error {
+	title := fmt.Sprintf("取消归档 · %s", firstLine(task.Goal))
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n\n", title)
+	fmt.Fprintf(&b, "- 任务：`%s`\n- 目标：%s\n- 取消时刻：%s\n\n", task.ID, task.Goal, time.Now().UTC().Format(time.RFC3339))
+	b.WriteString("| 子任务 | 取消前状态 |\n| --- | --- |\n")
+	for _, sub := range subs {
+		fmt.Fprintf(&b, "| %s | %s |\n", sub.Title, sub.Status)
+	}
+	doc := store.ArchiveDoc{
+		ID: store.NewID(), TaskID: task.ID, Source: "tower", DocType: "cancel",
+		Title: title, Content: b.String(), WordCount: wordCount(b.String()), Version: 1,
+	}
+	return s.st.InsertArchiveDoc(doc)
+}
+
 // FinalSummary 任务终审汇总（归档中心检索入口）
 func (s *Service) FinalSummary(task store.Task, subs []store.Subtask, spotPassed string, costCents float64) error {
 	title := fmt.Sprintf("任务终审汇总 · %s", firstLine(task.Goal))

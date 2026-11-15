@@ -97,6 +97,10 @@ type Orchestrator struct {
 	inBatch bool
 	// 6.4.11 孵化器级预算：月度成本超限 → 停派 + budget_changed（状态翻转时通知一次）
 	budgetSuspended sync.Map // incubator_id → bool
+	// M2.6 §6.4.3.3 取消收尾结果（CancelTask API 契约字段）
+	cancelledSubtasks  int
+	notifiedIncubators []string
+	lastCancelledTask  string
 }
 
 func New(st *store.Store, disp *dispatcher.Dispatcher, hub *events.Hub,
@@ -347,17 +351,19 @@ func (o *Orchestrator) HandleResult(r Result) {
 		return
 	}
 
-	// ── 复核子任务回传 → E04 回路（幂等：非在途回传一律吸收，防广播双跑/重放重复归档）──
+	// ── 复核子任务回传 → E04 回路（V3.5.10 per-kind 守卫：FinishReviewAttempt——
+	//     pending 兼容广播双跑未 claim 回传（attempt=0 补记 1），attempt/incubator 门禁）──
 	if sub.Kind == "review" {
-		if sub.Status != "pending" && sub.Status != "dispatched" && sub.Status != "running" {
-			return // E07：终态复核重复回传不重复生效
-		}
-		verdict, note := parseReviewVerdict(r, sub)
+		verdict0, _ := parseReviewVerdict(r, sub)
 		status := "completed"
-		if verdict != "approved" {
+		if verdict0 != "approved" {
 			status = "failed"
 		}
-		_ = o.st.FinishSubtask(sub.ID, status, r.Result, r.Error, r.WorkerID, r.StartedAt, r.Fingerprint)
+		changed, err := o.st.FinishReviewAttempt(sub.ID, status, r.Result, r.Error, r.WorkerID, r.StartedAt, r.Fingerprint, r.IncubatorID, r.AttemptCount)
+		if err != nil || !changed {
+			return // E07/E17：重复结果、旧 attempt、错误孵化器、已取消 → stale 忽略
+		}
+		verdict, note := parseReviewVerdict(r, sub)
 		o.qual.OnReviewResult(sub, verdict, note)
 		o.Notify()
 		return
@@ -585,6 +591,23 @@ func (o *Orchestrator) OnGuardrailDecision(subtaskID string, approved bool) {
 // 子任务向其孵化器单播 task_cancelled（载荷 {task_id, subtask_id, attempt_count}，
 // 孵化器按 attempt 匹配中断执行并抑制回传；E17 兜底由 §6.4.3.2 条件核销承担）。
 // 幂等：任务已终态时 changed=false，不重复产生副作用。
+// CancelResult 取消收尾结果（M2.6 §6.4.3.3 API 契约）
+type CancelResult struct {
+	ID                 string   `json:"id"`
+	Status             string   `json:"status"`
+	Changed            bool     `json:"changed"`
+	CancelledSubtasks  int      `json:"cancelled_subtasks"`
+	NotifiedIncubators []string `json:"notified_incubators"`
+}
+
+// cancelState 取消收尾结果暂存（单任务取消端点取用）
+var cancelState struct {
+	mu                 sync.Mutex
+	taskID             string
+	cancelledSubtasks  int
+	notifiedIncubators []string
+}
+
 func (o *Orchestrator) CancelTask(taskID string) (bool, error) {
 	task, err := o.st.GetTask(taskID)
 	if err != nil {
@@ -598,7 +621,16 @@ func (o *Orchestrator) CancelTask(taskID string) (bool, error) {
 		return false, err
 	}
 	_ = o.st.SetTaskStatus(taskID, "cancelled")
+	// 取消收尾口径（M2.6 §6.4.3.3）：成本不回收（审计对账）/ 关联未决审批作废 / 取消归档 / 事件
+	if n, err := o.st.ExpireTaskApprovals(taskID); err == nil && n > 0 {
+		log.Printf("[orch] task %s cancelled: %d pending approvals expired", taskID, n)
+	}
+	subs, _ := o.st.ListSubtasks(taskID)
+	if err := o.arch.CancelDoc(task, subs); err != nil {
+		log.Printf("[orch] cancel doc: %v", err)
+	}
 	o.hub.Publish("task_cancelled", map[string]any{"task_id": taskID})
+	notified := []string{}
 	sent := map[string]bool{}
 	for _, f := range inflight {
 		if f.IncubatorID == "" {
@@ -607,12 +639,38 @@ func (o *Orchestrator) CancelTask(taskID string) (bool, error) {
 		o.disp.NotifyIncubator(f.IncubatorID, "task_cancelled", map[string]any{
 			"task_id": taskID, "subtask_id": f.SubtaskID, "attempt_count": f.Attempt,
 		})
+		// 每个子任务发 subtask_finished（status=cancelled），走 SSE telemetry.update
+		o.hub.Publish("subtask_finished", map[string]any{
+			"task_id": taskID, "subtask_id": f.SubtaskID, "status": "cancelled",
+			"task_status": "cancelled",
+		})
 		if !sent[f.IncubatorID] {
 			o.disp.NotifyIncubator(f.IncubatorID, "task_cancelled", map[string]any{"task_id": taskID})
+			notified = append(notified, f.IncubatorID)
 			sent[f.IncubatorID] = true
 		}
 	}
+	cancelState.mu.Lock()
+	cancelState.taskID = taskID
+	cancelState.cancelledSubtasks = len(inflight)
+	cancelState.notifiedIncubators = notified
+	cancelState.mu.Unlock()
 	return true, nil
+}
+
+// PopCancelResult 取消收尾结果（cancel 端点 200 响应体；M2.6 §6.4.3.3 API 契约）
+func (o *Orchestrator) PopCancelResult(taskID string) CancelResult {
+	cancelState.mu.Lock()
+	defer cancelState.mu.Unlock()
+	if cancelState.taskID != taskID {
+		return CancelResult{ID: taskID, Status: "cancelled", Changed: false}
+	}
+	r := CancelResult{ID: taskID, Status: "cancelled", Changed: true,
+		CancelledSubtasks: cancelState.cancelledSubtasks, NotifiedIncubators: cancelState.notifiedIncubators}
+	cancelState.taskID = ""
+	cancelState.cancelledSubtasks = 0
+	cancelState.notifiedIncubators = nil
+	return r
 }
 
 // ── 调度主循环（6.4.7 selectIncubator + 6.4.3 dispatchToIncubators）──
@@ -676,15 +734,19 @@ func (o *Orchestrator) schedule() {
 				return // 本轮无可用槽位，等下次 Notify
 			}
 			// M2.6 §6.4.3.1 原子抢占：状态推进 + attempt 递增 + 租约设置（单条 UPDATE）
-			timeoutMs := int64(0)
 			var step struct {
-				TimeoutMs int64 `json:"timeout_ms"`
+				Mode      string       `json:"mode"`
+				TimeoutMs int64        `json:"timeout_ms"`
+				Session   *SessionSpec `json:"session"`
 			}
 			_ = json.Unmarshal([]byte(s.Payload), &step)
-			if step.TimeoutMs > 0 {
-				timeoutMs = step.TimeoutMs
+			if step.Session != nil {
+				step.Mode = "session_agent"
+				if step.Session.TimeoutMs > 0 {
+					step.TimeoutMs = step.Session.TimeoutMs
+				}
 			}
-			attempt, err := o.st.ClaimSubtaskLease(s.ID, cands[0].ID, timeoutMs)
+			attempt, err := o.st.ClaimSubtaskLease(s.ID, cands[0].ID, store.LeaseTimeoutFor(step.Mode, step.TimeoutMs))
 			if err != nil {
 				log.Printf("[orch] claim failed subtask=%s: %v", s.ID, err)
 				continue

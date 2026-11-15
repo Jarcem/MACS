@@ -168,8 +168,13 @@ func main() {
 		}
 	}
 
-	// ── M2.6 §6.4.3.3 取消注册表：dispatch 登记意图，task_cancelled 按 attempt 中断 ──
+	// ── M2.6 §6.4.3.3 取消注册表：dispatch 登记意图，task_cancelled 按 attempt 中断；
+	//    墓碑持久化（本地 SQLite，24h 保留，启动加载）——重启后取消失效防护 ──
 	cancels := worker.NewCancelRegistry()
+	cancels.SetPersistence(st.SaveTombstone)
+	for id, att := range st.LoadTombstones() {
+		cancels.LoadTombstone(id, att)
+	}
 
 	// ── 模块 #18 spawner：并发槽 + 在跑子任务登记（worker_rollback 幂等销毁 E16）──
 	sem := make(chan struct{}, maxWorkers)

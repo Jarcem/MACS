@@ -18,6 +18,7 @@ type CancelRegistry struct {
 	mu         sync.Mutex
 	executions map[string]*cancelEntry
 	tombstones map[string]int64
+	persist    func(subtaskID string, attempt int64) // 墓碑持久化钩子（先落库再更新缓存）
 }
 
 type cancelEntry struct {
@@ -29,6 +30,22 @@ func NewCancelRegistry() *CancelRegistry {
 	return &CancelRegistry{
 		executions: map[string]*cancelEntry{},
 		tombstones: map[string]int64{},
+	}
+}
+
+// SetPersistence 挂载墓碑持久化钩子（孵化器本地 SQLite；V3.5.10 §6.4.3.3）
+func (c *CancelRegistry) SetPersistence(fn func(subtaskID string, attempt int64)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.persist = fn
+}
+
+// LoadTombstone 启动时加载持久化墓碑进缓存（V3.5.10 §6.4.3.3 墓碑持久化）
+func (c *CancelRegistry) LoadTombstone(subtaskID string, attempt int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if attempt > c.tombstones[subtaskID] {
+		c.tombstones[subtaskID] = attempt
 	}
 }
 
@@ -62,6 +79,9 @@ func (c *CancelRegistry) OnTaskCancelled(subtaskID string, attempt int) bool {
 	defer c.mu.Unlock()
 	if int64(attempt) > c.tombstones[subtaskID] {
 		c.tombstones[subtaskID] = int64(attempt)
+		if c.persist != nil {
+			c.persist(subtaskID, int64(attempt)) // 先落库再更新缓存（写路径顺序）
+		}
 	}
 	if e, ok := c.executions[subtaskID]; ok && e.attempt == attempt {
 		if e.cancel != nil {

@@ -77,6 +77,16 @@ func (s *Store) DecideApproval(id, decision, approver, note string) (bool, error
 	return n > 0, nil
 }
 
+// ExpireTaskApprovals 任务取消收尾（M2.6 §6.4.3.3 取消收尾口径）：关联未决审批置 expired
+func (s *Store) ExpireTaskApprovals(taskID string) (int64, error) {
+	res, err := s.db.Exec(`UPDATE approvals SET status='expired', decision_note='task_cancelled', decided_at=?, updated_at=?
+		WHERE task_id=? AND status='pending'`, now(), now(), taskID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ExpireApprovals 超时审批过期（FR-19 多场景超时）
 func (s *Store) ExpireApprovals() (int64, error) {
 	res, err := s.db.Exec(`UPDATE approvals SET status='expired', updated_at=? WHERE status='pending' AND expires_at <> '' AND expires_at <= ?`,

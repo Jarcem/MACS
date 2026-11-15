@@ -131,6 +131,32 @@ func (s *Store) CountBuffered() (int, error) {
 	return n, err
 }
 
+// SaveTombstone 取消墓碑写库（先落库再更新缓存；M2.6 §6.4.3.3）
+func (s *Store) SaveTombstone(subtaskID string, attempt int64) {
+	_, _ = s.db.Exec(`INSERT INTO cancel_tombstones(subtask_id,max_attempt,created_at) VALUES(?,?,?)
+		ON CONFLICT(subtask_id) DO UPDATE SET max_attempt=MAX(max_attempt, excluded.max_attempt)`,
+		subtaskID, attempt, time.Now().UTC().Format(time.RFC3339))
+}
+
+// LoadTombstones 启动加载（24h 保留期清理后加载）
+func (s *Store) LoadTombstones() map[string]int64 {
+	out := map[string]int64{}
+	rows, err := s.db.Query(`SELECT subtask_id, max_attempt FROM cancel_tombstones WHERE created_at > ?`,
+		time.Now().UTC().Add(-24*time.Hour).Format(time.RFC3339))
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var att int64
+		if err := rows.Scan(&id, &att); err == nil {
+			out[id] = att
+		}
+	}
+	return out
+}
+
 // RecordDispatch dispatch_inbox 幂等登记（6.2.4：重复下发不重复执行，仅重 ACK）
 // 返回 dup=true 表示该 msg_id 已处理过
 func (s *Store) RecordDispatch(msgID, msgType, payload string) (bool, error) {

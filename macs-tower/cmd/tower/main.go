@@ -430,12 +430,12 @@ func main() {
 		wj(w, map[string]any{"data": evs})
 	})
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", guard(authz.ScopeOps, func(w http.ResponseWriter, r *http.Request) {
-		changed, err := orch.CancelTask(r.PathValue("id"))
-		if err != nil {
+		// M2.6 §6.4.3.3 API 契约：200 {id, status:cancelled, changed, cancelled_subtasks, notified_incubators}
+		if _, err := orch.CancelTask(r.PathValue("id")); err != nil {
 			apiErr(w, 500, 66500, err.Error())
 			return
 		}
-		wj(w, map[string]any{"ok": true, "changed": changed}) // 幂等：已终态 changed=false（M2.6 §6.4.3.3）
+		wj(w, orch.PopCancelResult(r.PathValue("id")))
 	}))
 
 	// ── M3 质量面：审批 / 抽查 / 追溯 / 归档 ──

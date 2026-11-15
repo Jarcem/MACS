@@ -360,24 +360,32 @@ func (s *Store) GetSubtask(id string) (Subtask, error) {
 	return scanSubtask(row)
 }
 
-// LeaseTimeoutFor 租约时长（M2.6 §6.4.3.1）：
-// min(max(timeout_ms, 120s), 600s) + 30s（网络与结果回传宽限）
-func LeaseTimeoutFor(timeoutMs int64) time.Duration {
-	d := time.Duration(timeoutMs) * time.Millisecond
-	if d < 120*time.Second {
-		d = 120 * time.Second
+// LeaseTimeoutFor 租约时长（M2.6 §6.4.3.1，V3.5.10 mode 感知口径）：
+//   普通子任务       base = timeout_ms>0 ? timeout_ms : 120s；ceiling 10min；grace 30s
+//   session_agent    base = timeout_ms>0 ? timeout_ms : 30min；ceiling 120min；grace 120s
+//   （长会话若沿用 10min 上限会被 Watchdog 误判到期并重投，造成同 session 重复执行）
+func LeaseTimeoutFor(mode string, timeoutMs int64) time.Duration {
+	base := time.Duration(timeoutMs) * time.Millisecond
+	ceiling, grace := 10*time.Minute, 30*time.Second
+	if mode == "session_agent" {
+		if base <= 0 {
+			base = 30 * time.Minute
+		}
+		ceiling, grace = 120*time.Minute, 120*time.Second
+	} else if base <= 0 {
+		base = 120 * time.Second
 	}
-	if d > 600*time.Second {
-		d = 600 * time.Second
+	if base > ceiling {
+		base = ceiling
 	}
-	return d + 30*time.Second
+	return base + grace
 }
 
 // ClaimSubtaskLease 原子抢占（M2.6 §6.4.3.1 唯一口径）：单条 UPDATE 完成状态推进、
 // attempt 递增、租约设置，并清空上一轮执行产物（旧结果不得误读）。
 // 返回本次 attempt_count（dispatch 载荷必须原样带回，孵化器结果按 attempt 条件核销）。
-func (s *Store) ClaimSubtaskLease(id, incubatorID string, timeoutMs int64) (int, error) {
-	lease := time.Now().UTC().Add(LeaseTimeoutFor(timeoutMs)).Format(time.RFC3339)
+func (s *Store) ClaimSubtaskLease(id, incubatorID string, leaseTimeout time.Duration) (int, error) {
+	lease := time.Now().UTC().Add(leaseTimeout).Format(time.RFC3339)
 	res, err := s.db.Exec(`UPDATE subtasks
 		SET status='dispatched', incubator_id=?, attempt_count=attempt_count+1,
 		    lease_expires_at=?, worker_id='', result='', error='',
@@ -405,67 +413,70 @@ type RecoveredLease struct {
 	Attempts  int
 }
 
+// LeaseBackoff 租约到期失败后的重试退避（V3.5.10 唯一记账口径）：
+// backoff(n) = min(2^(n-1) × 5s, 60s)，n 为已执行 attempt 数
+func LeaseBackoff(attempt int) time.Duration {
+	d := (1 << uint(attempt-1)) * 5 * time.Second
+	if d > 60*time.Second {
+		d = 60 * time.Second
+	}
+	return d
+}
+
 // RecoverExpiredLeases 确定性租约回收（M2.6 §6.4.3.1，编排器每 5s 调用；now 由调用方注入，
-// 禁止在回收算法内读取系统时间，保证单测可精确重放到期边界）：
-//   attempt_count < max_retries → 重置 pending（清空载体/产物），等待重新调度
-//   attempt_count >= max_retries → failed（E01 重试耗尽口径）
+// 禁止在回收算法内读取系统时间，保证单测可精确重放到期边界）。
+// V3.5.10 唯一记账口径：attempt_count 仅由 ClaimSubtask 递增；到期**复用 E01 的
+// failed + next_retry_at 退避**（不直接置 pending）——
+//   attempt_count < max_retries → failed + next_retry_at = now + backoff(attempt)（RequeueRetryable 到期回池）
+//   attempt_count >= max_retries → failed（E01 重试耗尽，无 next_retry_at）
 // 回收后调用方必须 RecomputeTask。
 func (s *Store) RecoverExpiredLeases(nowTS string) ([]RecoveredLease, error) {
 	var out []RecoveredLease
-	// 重试路径
 	rows, err := s.db.Query(`SELECT id, task_id, attempt_count FROM subtasks
-		WHERE status IN ('dispatched','running') AND lease_expires_at <> '' AND lease_expires_at <= ?
-		  AND attempt_count < max_retries`, nowTS)
+		WHERE status IN ('dispatched','running') AND lease_expires_at <> '' AND lease_expires_at <= ?`, nowTS)
 	if err != nil {
 		return nil, err
 	}
-	var retryIDs []string
+	type expired struct {
+		id, tid string
+		att     int
+	}
+	var expiredList []expired
 	taskSet := map[string]bool{}
 	for rows.Next() {
-		var id, tid string
-		var att int
-		if err := rows.Scan(&id, &tid, &att); err != nil {
+		var e expired
+		if err := rows.Scan(&e.id, &e.tid, &e.att); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		retryIDs = append(retryIDs, id)
-		taskSet[tid] = true
-		out = append(out, RecoveredLease{SubtaskID: id, TaskID: tid, Action: "retry", Attempts: att})
+		expiredList = append(expiredList, e)
+		taskSet[e.tid] = true
 	}
 	rows.Close()
-	for _, id := range retryIDs {
-		if _, err := s.db.Exec(`UPDATE subtasks SET status='pending', incubator_id='', worker_id='',
-			lease_expires_at='', result='', error='', started_at=NULL, finished_at=NULL, updated_at=?
-			WHERE id=?`, nowTS, id); err != nil {
+	for _, e := range expiredList {
+		var action string
+		// max_retries 含首发：attempt < max_retries → 有重试余量（failed + next_retry_at 退避）
+		var maxRetries int
+		if err := s.db.QueryRow(`SELECT max_retries FROM subtasks WHERE id=?`, e.id).Scan(&maxRetries); err != nil {
 			return nil, err
 		}
-	}
-	// 耗尽路径（E01 口径）
-	rows, err = s.db.Query(`SELECT id, task_id, attempt_count FROM subtasks
-		WHERE status IN ('dispatched','running') AND lease_expires_at <> '' AND lease_expires_at <= ?
-		  AND attempt_count >= max_retries`, nowTS)
-	if err != nil {
-		return nil, err
-	}
-	var failIDs []string
-	for rows.Next() {
-		var id, tid string
-		var att int
-		if err := rows.Scan(&id, &tid, &att); err != nil {
-			rows.Close()
-			return nil, err
+		if e.att < maxRetries {
+			action = "retry"
+			next := time.Now().UTC().Add(LeaseBackoff(e.att)).Format(time.RFC3339)
+			if _, err := s.db.Exec(`UPDATE subtasks SET status='failed',
+				error='lease expired (will retry)', lease_expires_at='', next_retry_at=?, finished_at=NULL, updated_at=?
+				WHERE id=?`, next, nowTS, e.id); err != nil {
+				return nil, err
+			}
+		} else {
+			action = "failed"
+			if _, err := s.db.Exec(`UPDATE subtasks SET status='failed',
+				error='lease expired after N attempts', lease_expires_at='', updated_at=?
+				WHERE id=?`, nowTS, e.id); err != nil {
+				return nil, err
+			}
 		}
-		failIDs = append(failIDs, id)
-		taskSet[tid] = true
-		out = append(out, RecoveredLease{SubtaskID: id, TaskID: tid, Action: "failed", Attempts: att})
-	}
-	rows.Close()
-	for _, id := range failIDs {
-		if _, err := s.db.Exec(`UPDATE subtasks SET status='failed',
-			error='lease expired after N attempts', finished_at=NULL, updated_at=?
-			WHERE id=?`, nowTS, id); err != nil {
-			return nil, err
-		}
+		out = append(out, RecoveredLease{SubtaskID: e.id, TaskID: e.tid, Action: action, Attempts: e.att})
 	}
 	for tid := range taskSet {
 		if _, err := s.RecomputeTask(tid); err != nil {
@@ -492,6 +503,33 @@ func (s *Store) FinishSubtaskAttempt(id, status, result, errMsg, workerID, start
 		  AND attempt_count=?
 		  AND incubator_id=?
 		  AND attempt_count>0`,
+		status, result, errMsg, workerID, fingerprint, startedAt, now(), now(),
+		id, attempt, incubatorID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// FinishReviewAttempt 复核子任务条件核销（V3.5.10 §6.4.3.2 per-kind 守卫）：
+//   来源状态 dispatched/running/pending（pending 兼容广播双跑中未 claim 的合法回传）；
+//   attempt 门禁 attempt_count=?；pending 来源要求 attempt=0 并收口补记为 1；
+//   incubator 为空或与回传方一致。
+// 返回 changed=true 才允许产生下游副作用。
+func (s *Store) FinishReviewAttempt(id, status, result, errMsg, workerID, startedAt, fingerprint, incubatorID string, attempt int) (bool, error) {
+	if status != "completed" && status != "failed" {
+		return false, fmt.Errorf("illegal terminal status %q (only completed/failed)", status)
+	}
+	res, err := s.db.Exec(`UPDATE subtasks
+		SET status=?, result=?, error=?, worker_id=?, fingerprint=?,
+		    started_at=COALESCE(NULLIF(?,''), started_at), finished_at=?, updated_at=?,
+		    attempt_count=CASE WHEN attempt_count=0 THEN 1 ELSE attempt_count END
+		WHERE id=?
+		  AND status IN ('dispatched','running','pending')
+		  AND attempt_count=?
+		  AND (incubator_id IS NULL OR incubator_id='' OR incubator_id=?)
+		  AND attempt_count>=0`,
 		status, result, errMsg, workerID, fingerprint, startedAt, now(), now(),
 		id, attempt, incubatorID)
 	if err != nil {
@@ -558,23 +596,39 @@ func (s *Store) SetSubtaskFingerprint(id, fp string) error {
 }
 
 // SetSubtaskStatus 质量管线中间态推进（review_pending/reviewing/in_spot_check 等），附合法性校验由调用方负责
+// SetSubtaskStatus 质量管线中间态推进（V3.5.10 状态门：status <> 'cancelled'）——
+// 取消后的子任务不得被质量管线回滚成 pending 重新调度（E17 口径）
 func (s *Store) SetSubtaskStatus(id, status, quality string) error {
-	_, err := s.db.Exec(`UPDATE subtasks SET status=?, quality_status=?, updated_at=? WHERE id=?`,
+	res, err := s.db.Exec(`UPDATE subtasks SET status=?, quality_status=?, updated_at=? WHERE id=? AND status <> 'cancelled'`,
 		status, quality, now(), id)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("subtask %s is cancelled (guard)", id)
+	}
+	return nil
 }
 
 // SetSubtaskRetry E01 失败重试登记：累计次数 + 退避到期时刻
 func (s *Store) SetSubtaskRetry(id string, attempt, maxRetries int, nextRetryAt string) error {
-	_, err := s.db.Exec(`UPDATE subtasks SET attempt_count=?, max_retries=?, next_retry_at=?, updated_at=? WHERE id=?`,
-		attempt, maxRetries, nextRetryAt, now(), id)
-	return err
+	res, err := s.db.Exec(`UPDATE subtasks SET attempt_count=?, max_retries=?, next_retry_at=?, updated_at=?
+		WHERE id=? AND status <> 'cancelled'`, attempt, maxRetries, nextRetryAt, now(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("subtask %s is cancelled (retry guard)", id)
+	}
+	return nil
 }
 
 // RequeueRetryable 将退避到期且仍有重试额度的失败子任务重新置为 pending（E01）
 func (s *Store) RequeueRetryable() (int64, error) {
-	res, err := s.db.Exec(`UPDATE subtasks SET status='pending', next_retry_at='', updated_at=?
-		WHERE status='failed' AND attempt_count < max_retries AND next_retry_at <> '' AND next_retry_at <= ?`,
+	// V3.5.10：回池时清空上一轮载体与产物（§6.4.3.1 retry 口径）
+	res, err := s.db.Exec(`UPDATE subtasks SET status='pending', next_retry_at='', incubator_id='', worker_id='',
+		result='', error='', updated_at=?
+		WHERE status='failed' AND status <> 'cancelled' AND attempt_count < max_retries AND next_retry_at <> '' AND next_retry_at <= ?`,
 		now(), now())
 	if err != nil {
 		return 0, err
@@ -665,8 +719,8 @@ func (s *Store) RecomputeTask(taskID string) (Task, error) {
 	var nearDone float64 // self_checking/review_pending/reviewing/in_spot_check 加权 0.9（in_spot_check 按复核已过计 1）
 	err := s.db.QueryRow(`SELECT COUNT(1),
 		COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status IN ('pending','ready','dispatched','running','frozen','cancelled') THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status='failed' AND next_retry_at='' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status IN ('pending','ready','dispatched','running','frozen','cancelled') OR (status='failed' AND next_retry_at<>'') THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN status IN ('self_checking','review_pending','reviewing') THEN 0.9 WHEN status='in_spot_check' THEN 1 ELSE 0 END),0)
 		FROM subtasks WHERE task_id=?`, taskID).Scan(&total, &done, &failed, &pending, &nearDone)
 	if err != nil {
