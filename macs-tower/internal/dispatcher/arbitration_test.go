@@ -95,7 +95,7 @@ func TestBroadcastArbitrationSingleWinner(t *testing.T) {
 	}
 
 	// 广播下发：first-ACK-wins 必须产生唯一承接者
-	winner, err := d.DispatchBroadcast(context.Background(), candidates, "sub-arb", map[string]any{"mode": "noop"})
+	winner, err := d.DispatchBroadcast(context.Background(), candidates, "sub-arb", map[string]any{"mode": "noop"}, 1)
 	if err != nil {
 		t.Fatalf("broadcast: %v", err)
 	}

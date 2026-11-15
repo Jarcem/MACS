@@ -430,11 +430,12 @@ func main() {
 		wj(w, map[string]any{"data": evs})
 	})
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", guard(authz.ScopeOps, func(w http.ResponseWriter, r *http.Request) {
-		if err := orch.CancelTask(r.PathValue("id")); err != nil {
-			apiErr(w, 409, 66300, err.Error())
+		changed, err := orch.CancelTask(r.PathValue("id"))
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
 			return
 		}
-		wj(w, map[string]any{"ok": true})
+		wj(w, map[string]any{"ok": true, "changed": changed}) // 幂等：已终态 changed=false（M2.6 §6.4.3.3）
 	}))
 
 	// ── M3 质量面：审批 / 抽查 / 追溯 / 归档 ──
@@ -757,7 +758,9 @@ func main() {
 				_, _ = w.Write([]byte(": heartbeat\n\n"))
 				fl.Flush()
 			case b := <-ch:
-				_, _ = w.Write([]byte("data: "))
+				// M2.6：SSE 命名事件帧（UI §14.1 / 主设计 6.4.13.3）——
+				// web/DSH 统一 addEventListener('telemetry.update')
+				_, _ = w.Write([]byte("event: telemetry.update\ndata: "))
 				_, _ = w.Write(b)
 				_, _ = w.Write([]byte("\n\n"))
 				fl.Flush()

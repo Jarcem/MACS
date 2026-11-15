@@ -168,6 +168,9 @@ func main() {
 		}
 	}
 
+	// ── M2.6 §6.4.3.3 取消注册表：dispatch 登记意图，task_cancelled 按 attempt 中断 ──
+	cancels := worker.NewCancelRegistry()
+
 	// ── 模块 #18 spawner：并发槽 + 在跑子任务登记（worker_rollback 幂等销毁 E16）──
 	sem := make(chan struct{}, maxWorkers)
 	var workerSeq int64
@@ -184,10 +187,15 @@ func main() {
 		}
 	}
 
-	execute := func(subtaskID string, taskDef map[string]any) {
+	execute := func(subtaskID string, taskDef map[string]any, attempt int) {
 		sem <- struct{}{}
 		defer func() { <-sem }()
 
+		// M2.6 §6.4.3.3：attempt 被取消墓碑覆盖 → 取消先于调度，禁止孵化
+		if !cancels.AllowDispatch(subtaskID, attempt) {
+			log.Printf("[incubator] dispatch suppressed subtask=%s attempt=%d (cancelled tombstone)", subtaskID, attempt)
+			return
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		execMu.Lock()
 		if _, exists := active[subtaskID]; exists { // dispatch_inbox 已挡重复，双保险
@@ -196,10 +204,12 @@ func main() {
 			return
 		}
 		active[subtaskID] = cancel
+		cancels.Register(subtaskID, attempt, cancel)
 		execMu.Unlock()
 		finish := func() {
 			execMu.Lock()
 			delete(active, subtaskID)
+			cancels.Deregister(subtaskID)
 			execMu.Unlock()
 			cancel()
 		}
@@ -241,6 +251,7 @@ func main() {
 			"status":    out.Status, "result": out.Result, "error": out.Error,
 			"started_at": out.StartedAt, "finished_at": out.FinishedAt, "duration_ms": out.DurationMs,
 			"fingerprint": fp, "self_check": selfCheck,
+			"attempt_count": attempt, // M2.6 §6.4.3.2：结果按 attempt 条件核销
 		}
 		// 会话载体：session_id 回执 → 塔侧 carrier 亲和（同任务后续子 Worker 在同一 session 孵化）
 		if job.Session != nil {
@@ -305,6 +316,19 @@ func main() {
 					rollback(p.SubtaskID)
 				}
 				continue
+			case "task_cancelled":
+				// M2.6 §6.4.3.3：attempt 匹配在跑项 → 中断并抑制回传；不匹配/未运行 → 仅墓碑
+				var tc struct {
+					SubtaskID    string `json:"subtask_id"`
+					AttemptCount int    `json:"attempt_count"`
+				}
+				_ = json.Unmarshal(msg.Payload, &tc)
+				if tc.SubtaskID != "" {
+					terminated := cancels.OnTaskCancelled(tc.SubtaskID, tc.AttemptCount)
+					log.Printf("[incubator] task_cancelled subtask=%s attempt=%d interrupted=%v",
+						tc.SubtaskID, tc.AttemptCount, terminated)
+				}
+				continue // 已按 notice 口径处理；不落入 dispatch 解析
 			case "worker_rollback":
 				var p struct {
 					SubtaskID string `json:"subtask_id"`
@@ -328,11 +352,15 @@ func main() {
 
 			// dispatch 处理：dispatch_inbox 幂等去重（6.2.4：重复消息直接回 ACK 不重复执行）
 			var p struct {
-				SubtaskID string         `json:"subtask_id"`
-				TaskDef   map[string]any `json:"task_def"`
+				SubtaskID    string         `json:"subtask_id"`
+				TaskDef      map[string]any `json:"task_def"`
+				AttemptCount int            `json:"attempt_count"` // M2.6 §6.4.3.1：随载荷下发，结果原样带回
 			}
 			if json.Unmarshal(msg.Payload, &p) != nil || p.SubtaskID == "" {
 				continue
+			}
+			if p.AttemptCount <= 0 {
+				p.AttemptCount = 1 // 兼容旧塔（未携带 attempt）
 			}
 			dup, _ := st.RecordDispatch(msg.MsgID, msg.Type, string(msg.Payload))
 			ackBody := map[string]any{
@@ -358,8 +386,8 @@ func main() {
 			_, _ = conn.WriteToUDP(b, src)
 
 			if !dup && msg.Type == "dispatch" && !suspended {
-				log.Printf("[incubator] spawn worker subtask=%s", p.SubtaskID)
-				go execute(p.SubtaskID, p.TaskDef)
+				log.Printf("[incubator] spawn worker subtask=%s attempt=%d", p.SubtaskID, p.AttemptCount)
+				go execute(p.SubtaskID, p.TaskDef, p.AttemptCount)
 			} else if !dup && msg.Type == "dispatch" && suspended {
 				log.Printf("[incubator] dispatch rejected subtask=%s (budget_exceeded)", p.SubtaskID)
 			}

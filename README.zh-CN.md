@@ -559,6 +559,7 @@ macs/
 
 - 6.4.10 护栏：唤醒环冻结 / done 验收门 / 断路器 / 有界上下文 / Worker TTL 看门狗已实现；空闲下岗由 TTL 看门狗等价覆盖
 - **会话载体 Worker 已实现**：zcode / trae / DeepSeek Harness / claude code / codex 作为持久载体，子 Worker 在同一 session 内连续孵化（任务级 carrier 亲和）；进程树终止（Unix 进程组 / Windows taskkill /T /F）落地
+- **M2.6 任务生命周期已实现**：子任务租约（lease_expires_at + 5s 确定性回收）、执行结果条件核销（attempt+incubator 匹配，E17 迟到结果不复活）、强制取消（全部在途/待执行 cancelled + 取消注册表 + task_cancelled 单播）、SSE 命名事件（telemetry.update）
 - 下行指令 `task_cancelled` / `approval_result` / `template_updated` / `budget_changed` 已接线；`task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` 协议常量就绪待适用
 - M2.6 未闭环项：子任务无 `lease_expires_at` 租约（仅靠全局 TTL 兜底，孵化器崩溃会卡在 `dispatched/running`）；`FinishSubtask` 未做 `attempt_count + incubator_id` 条件更新（旧 attempt 迟到结果可覆盖）；取消在途子任务仍 fail-open（无取消墓碑）；SSE 事件名为默认 `message`，DSH 插件监听的 `telemetry.update` 收不到
 - 已知测试缺陷：`macs-incubator` 的 `TestSessionDriverLifecycle` 使用 bash 脚本伪工具，在 Windows 下失败（测试可移植性问题，需按平台改写）

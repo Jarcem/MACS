@@ -81,9 +81,10 @@ function useEventStream(onEvent: (e: StreamEvent) => void) {
     const connect = () => {
       es = new EventSource('/api/v1/telemetry/stream');
       es.onopen = () => setLive(true);
-      es.onmessage = (m) => {
-        try { cb.current(JSON.parse(m.data) as StreamEvent); } catch { /* 忽略非 JSON 帧 */ }
-      };
+      // M2.6：SSE 命名事件（telemetry.update），与 DSH 终端订阅口径一致
+      es.addEventListener('telemetry.update', (m) => {
+        try { cb.current(JSON.parse((m as MessageEvent).data) as StreamEvent); } catch { /* 忽略非 JSON 帧 */ }
+      });
       es.onerror = () => {
         setLive(false);
         es?.close();

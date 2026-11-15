@@ -63,7 +63,7 @@ func TestExecutionResultReplayIdempotency(t *testing.T) {
 	if subA.ID == "" {
 		t.Fatal("未找到执行子任务")
 	}
-	if err := st.ClaimSubtask(subA.ID, "inc-1"); err != nil {
+	if _, err := st.ClaimSubtaskLease(subA.ID, "inc-1", 0); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 
@@ -127,7 +127,9 @@ func TestReviewResultReplayIdempotency(t *testing.T) {
 			break
 		}
 	}
-	_ = st.ClaimSubtask(subA.ID, "inc-1")
+	if _, err := st.ClaimSubtaskLease(subA.ID, "inc-1", 0); err != nil {
+		t.Fatal(err)
+	}
 	orch.HandleResult(Result{SubtaskID: subA.ID, Status: "completed",
 		Result: `{"mode":"text_analysis","chars":3,"non_space":3,"unique":3,"top_chars":[]}`, WorkerID: "w"})
 
@@ -136,7 +138,7 @@ func TestReviewResultReplayIdempotency(t *testing.T) {
 		t.Fatalf("复核孵化异常: %d", len(reviews))
 	}
 	review := reviews[0]
-	_ = st.ClaimSubtask(review.ID, "inc-1")
+	_, _ = st.ClaimSubtaskLease(review.ID, "inc-1", 0)
 
 	verdict := `{"review":{"status":"approved","fingerprint_match":true,"note":"指纹一致"}}`
 	for i := 0; i < 100; i++ {

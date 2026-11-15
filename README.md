@@ -534,6 +534,7 @@ macs/
 
 - 6.4.10 guardrails live: wake-loop freeze, done acceptance gate, circuit breaker, bounded context (LLM max-token cap), worker TTL watchdog
 - **Session-carrier workers implemented**: zcode / trae / DeepSeek Harness / claude code / codex as persistent carriers — sub-workers incubate inside the same session (task-level carrier affinity); process-tree termination landed (Unix process group / Windows taskkill /T /F)
+- **M2.6 task lifecycle implemented**: subtask leases (lease_expires_at + 5s deterministic recovery), conditional result finalization (attempt+incubator match, E17 late-result no-resurrect), forced cancellation (all in-flight/pending cancelled + cancel registry + task_cancelled unicast), named SSE events (telemetry.update)
 - Downlink wired: `task_cancelled` (rollback running workers) / `approval_result` / `template_updated` / `budget_changed`; `task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` constants ready, wire on demand
 - M2.6 gaps: no `lease_expires_at` subtask lease (only the global TTL watchdog; an incubator crash leaves subtasks stuck in `dispatched/running`); `FinishSubtask` has no `attempt_count + incubator_id` guard (a late old-attempt result can overwrite); cancelling in-flight subtasks is still fail-open (no tombstone); SSE frames use the default `message` event, so the DSH plugin's `telemetry.update` listener receives nothing
 - Known test defect: `macs-incubator` `TestSessionDriverLifecycle` uses a bash-script fake agent and fails on Windows (test portability; needs a per-platform rewrite)

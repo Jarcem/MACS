@@ -322,7 +322,8 @@ type Result struct {
 	StartedAt   string `json:"started_at"`
 	FinishedAt  string `json:"finished_at"`
 	Fingerprint string `json:"fingerprint"`
-	SessionID   string `json:"session_id"` // 会话载体回执（同任务后续子 Worker 在同一 session 孵化）
+	SessionID   string `json:"session_id"`
+	AttemptCount int  `json:"attempt_count"` // M2.6 §6.4.3.2：结果按 attempt 条件核销 // 会话载体回执（同任务后续子 Worker 在同一 session 孵化）
 	// §6.4.13.2 遥测扩展
 	Telemetry *udpTelemetry `json:"telemetry_metrics,omitempty"`
 }
@@ -378,9 +379,7 @@ func (o *Orchestrator) HandleResult(r Result) {
 	fp := ""
 	if status == "completed" {
 		fp = o.tr.ComputeFor(sub.TaskID, r.Result)
-	}
-	_ = o.st.FinishSubtask(sub.ID, status, r.Result, r.Error, r.WorkerID, r.StartedAt, fp)
-	if status == "completed" {
+		_ = o.st.SetSubtaskFingerprint(sub.ID, fp)
 		summary := fmt.Sprintf("%.80s", r.Result)
 		_ = o.tr.Record(sub.TaskID, sub.ID, fp, summary, "result", int64(len(r.Result)))
 		// 会话载体登记（幂等：仅首次；后续子 Worker 在同一 session 孵化）
@@ -581,39 +580,39 @@ func (o *Orchestrator) OnGuardrailDecision(subtaskID string, approved bool) {
 	o.Notify()
 }
 
-// CancelTask 取消任务（6.4.3 task_cancelled 语义）：未派发子任务置 cancelled，任务终态 cancelled
-func (o *Orchestrator) CancelTask(taskID string) error {
+// CancelTask 强制取消（M2.6 §6.4.3.3）：用户显式取消不是 fail-open——
+// 全部在途/待执行子任务强制 cancelled；取消前处于 dispatched/running 的
+// 子任务向其孵化器单播 task_cancelled（载荷 {task_id, subtask_id, attempt_count}，
+// 孵化器按 attempt 匹配中断执行并抑制回传；E17 兜底由 §6.4.3.2 条件核销承担）。
+// 幂等：任务已终态时 changed=false，不重复产生副作用。
+func (o *Orchestrator) CancelTask(taskID string) (bool, error) {
 	task, err := o.st.GetTask(taskID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if task.Status == "completed" || task.Status == "failed" || task.Status == "cancelled" {
-		return fmt.Errorf("task %s already %s", taskID, task.Status)
+		return false, nil // 幂等：不重复产生副作用
 	}
-	subs, _ := o.st.ListSubtasks(taskID)
-	for _, s := range subs {
-		switch s.Status {
-		case "pending", "ready", "frozen":
-			_ = o.st.SetSubtaskStatus(s.ID, "cancelled", "")
-		case "dispatched", "running", "review_pending", "reviewing", "in_spot_check":
-			// 在途子任务按 fail-open 收尾（10.1），不强制中断
-		}
+	inflight, err := o.st.ForceCancelSubtasks(taskID)
+	if err != nil {
+		return false, err
 	}
 	_ = o.st.SetTaskStatus(taskID, "cancelled")
 	o.hub.Publish("task_cancelled", map[string]any{"task_id": taskID})
-	// 6.4.3 下行接线：task_cancelled 通知涉及孵化器；在跑子任务凭 worker_rollback 幂等回滚
-	notif := map[string]any{"task_id": taskID, "goal": task.Goal}
 	sent := map[string]bool{}
-	for _, s := range subs {
-		if (s.Status == "dispatched" || s.Status == "running") && s.IncubatorID != "" {
-			o.disp.NotifyIncubator(s.IncubatorID, "worker_rollback", map[string]any{"subtask_id": s.ID})
+	for _, f := range inflight {
+		if f.IncubatorID == "" {
+			continue
 		}
-		if s.IncubatorID != "" && !sent[s.IncubatorID] {
-			o.disp.NotifyIncubator(s.IncubatorID, "task_cancelled", notif)
-			sent[s.IncubatorID] = true
+		o.disp.NotifyIncubator(f.IncubatorID, "task_cancelled", map[string]any{
+			"task_id": taskID, "subtask_id": f.SubtaskID, "attempt_count": f.Attempt,
+		})
+		if !sent[f.IncubatorID] {
+			o.disp.NotifyIncubator(f.IncubatorID, "task_cancelled", map[string]any{"task_id": taskID})
+			sent[f.IncubatorID] = true
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // ── 调度主循环（6.4.7 selectIncubator + 6.4.3 dispatchToIncubators）──
@@ -676,15 +675,25 @@ func (o *Orchestrator) schedule() {
 			if len(cands) == 0 {
 				return // 本轮无可用槽位，等下次 Notify
 			}
-			if err := o.st.ClaimSubtask(s.ID, cands[0].ID); err != nil {
+			// M2.6 §6.4.3.1 原子抢占：状态推进 + attempt 递增 + 租约设置（单条 UPDATE）
+			timeoutMs := int64(0)
+			var step struct {
+				TimeoutMs int64 `json:"timeout_ms"`
+			}
+			_ = json.Unmarshal([]byte(s.Payload), &step)
+			if step.TimeoutMs > 0 {
+				timeoutMs = step.TimeoutMs
+			}
+			attempt, err := o.st.ClaimSubtaskLease(s.ID, cands[0].ID, timeoutMs)
+			if err != nil {
 				log.Printf("[orch] claim failed subtask=%s: %v", s.ID, err)
 				continue
 			}
 			running[cands[0].ID]++
 			o.hub.Publish("subtask_dispatched", map[string]any{
-				"task_id": s.TaskID, "subtask_id": s.ID, "incubator_id": cands[0].ID,
+				"task_id": s.TaskID, "subtask_id": s.ID, "incubator_id": cands[0].ID, "attempt_count": attempt,
 			})
-			go o.dispatch(cands, s)
+			go o.dispatch(cands, s, attempt)
 		}
 	}
 }
@@ -698,17 +707,17 @@ func (o *Orchestrator) apprRaiseGlobalBudget(v billing.BudgetVerdict) error {
 }
 
 // dispatch 下发：广播模式（>1 候选）first-ACK-wins；失败/改派 → 依次尝试下一候选
-func (o *Orchestrator) dispatch(candidates []*store.Incubator, s store.Subtask) {
+func (o *Orchestrator) dispatch(candidates []*store.Incubator, s store.Subtask, attempt int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	def := o.taskDef(s)
 	var err error
 	if o.cfg.BroadcastEnabled && len(candidates) > 1 {
-		_, err = o.disp.DispatchBroadcast(ctx, candidates, s.ID, def)
+		_, err = o.disp.DispatchBroadcast(ctx, candidates, s.ID, def, attempt)
 	} else {
 		for _, c := range candidates {
-			_, err = o.disp.DispatchTo(ctx, c, s.ID, def)
+			_, err = o.disp.DispatchTo(ctx, c, s.ID, def, attempt)
 			if err == nil || errors.Is(err, dispatcher.ErrDriverMismatch) {
 				if err == nil {
 					break

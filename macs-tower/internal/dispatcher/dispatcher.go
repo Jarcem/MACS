@@ -113,10 +113,11 @@ func addrOf(i *store.Incubator) (*net.UDPAddr, error) {
 	return &net.UDPAddr{IP: net.ParseIP(i.LastIP), Port: i.ListenPort}, nil
 }
 
-// sendPacket 封包发送（单播；重传共用同一 msg_id，孵化器按 dispatch_inbox 幂等去重并重 ACK）
-func (d *Dispatcher) sendPacket(msgID, subtaskID string, taskDef map[string]any, dest *net.UDPAddr) error {
+// sendPacket 封包发送（单播；重传共用同一 msg_id，孵化器按 dispatch_inbox 幂等去重并重 ACK）。
+// attempt_count 随载荷下发（M2.6 §6.4.3.1：孵化器回传结果按 attempt 条件核销）
+func (d *Dispatcher) sendPacket(msgID, subtaskID string, taskDef map[string]any, attempt int, dest *net.UDPAddr) error {
 	env, err := udp.New(udp.MsgDispatch, map[string]any{
-		"subtask_id": subtaskID, "task_def": taskDef,
+		"subtask_id": subtaskID, "task_def": taskDef, "attempt_count": attempt,
 	})
 	if err != nil {
 		return err
@@ -273,7 +274,7 @@ func (d *Dispatcher) waitAck(ctx context.Context, p *pendingAck, timeout time.Du
 }
 
 // DispatchTo 定向下发（6.4.8 sendWithAck）：首传 + 3 重传，固定退避；同一 msg_id 贯穿全程
-func (d *Dispatcher) DispatchTo(ctx context.Context, target *store.Incubator, subtaskID string, taskDef map[string]any) (string, error) {
+func (d *Dispatcher) DispatchTo(ctx context.Context, target *store.Incubator, subtaskID string, taskDef map[string]any, attempt int) (string, error) {
 	dest, err := addrOf(target)
 	if err != nil {
 		return "", err
@@ -289,7 +290,7 @@ func (d *Dispatcher) DispatchTo(ctx context.Context, target *store.Incubator, su
 	defer d.pending.Delete(msgID)
 
 	for attempt := 0; attempt <= maxRetransmits; attempt++ {
-		if err := d.sendPacket(msgID, subtaskID, taskDef, dest); err != nil {
+		if err := d.sendPacket(msgID, subtaskID, taskDef, attempt, dest); err != nil {
 			d.store.SetDispatchAck(msgID, "failed")
 			return "", err
 		}
@@ -317,12 +318,12 @@ func (d *Dispatcher) DispatchTo(ctx context.Context, target *store.Incubator, su
 
 // DispatchBroadcast 广播下发（6.4.7 → 6.4.8）：候选集同包广播，first-ACK-wins 承接
 // 返回承接者孵化器 ID；全部候选未确认 → 候选整体回池（由编排器按失败重试处理）
-func (d *Dispatcher) DispatchBroadcast(ctx context.Context, candidates []*store.Incubator, subtaskID string, taskDef map[string]any) (string, error) {
+func (d *Dispatcher) DispatchBroadcast(ctx context.Context, candidates []*store.Incubator, subtaskID string, taskDef map[string]any, attempt int) (string, error) {
 	if len(candidates) == 0 {
 		return "", errors.New("no candidates")
 	}
 	if len(candidates) == 1 {
-		return d.DispatchTo(ctx, candidates[0], subtaskID, taskDef)
+		return d.DispatchTo(ctx, candidates[0], subtaskID, taskDef, attempt)
 	}
 
 	msgID := udp.NewID()
@@ -347,7 +348,7 @@ func (d *Dispatcher) DispatchBroadcast(ctx context.Context, candidates []*store.
 		if err != nil {
 			continue
 		}
-		if err := d.sendPacket(msgID, subtaskID, taskDef, dest); err != nil {
+		if err := d.sendPacket(msgID, subtaskID, taskDef, attempt, dest); err != nil {
 			continue
 		}
 		sent++
@@ -404,6 +405,11 @@ func (d *Dispatcher) StartJanitor() {
 
 // Dispatch M1 调度测试钩子：选首台在线孵化器定向下发
 func (d *Dispatcher) Dispatch(ctx context.Context, subtaskID string, taskDef map[string]any) (string, error) {
+	return d.dispatchWithAttempt(ctx, subtaskID, taskDef, 1) // M1 调试钩子：attempt=1
+}
+
+// dispatchWithAttempt 供 Dispatch 与编排器共用（attempt 显式传递）
+func (d *Dispatcher) dispatchWithAttempt(ctx context.Context, subtaskID string, taskDef map[string]any, attempt int) (string, error) {
 	list, err := d.store.ListIncubators(true)
 	if err != nil {
 		return "", err
@@ -418,7 +424,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, subtaskID string, taskDef map
 	if target == nil {
 		return "", errors.New("no online incubator")
 	}
-	return d.DispatchTo(ctx, target, subtaskID, taskDef)
+	return d.DispatchTo(ctx, target, subtaskID, taskDef, attempt)
 }
 
 // NoticeBudgetChanged 预算变更下行（6.4.11 budget_changed：limit_version 仅收紧不放宽）
