@@ -526,6 +526,7 @@ macs/
 - ✅ **M6 Unified agent platform protocol**: platform/driver/adapter registry + OpenAI/Anthropic protocol drivers (credential injection on incubator side + usage backfill) + telemetry events (SSE)
 - ✅ **M7 DSH monitoring terminal**: Ink TUI read-only monitor (REST/SSE data source aligned with the web HUD)
 - ✅ **M8 Command terminal**: per-terminal keys + HMAC-signed issuance (60s replay window) + allowlisted execution + register-ACK retry + audit reconciliation + secret rotation
+- 🟡 **M2.6 Task-lifecycle stopgap (in progress)**: landed `task_cancelled` unicast downlink (rolls back running subtasks) + process-tree termination (Unix process group / Windows `taskkill /T /F`) + session-carrier workers; **remaining**: subtask leases and deterministic watchdog, terminal-state protection (`attempt_count + incubator_id` conditional update), forced in-flight cancellation with tombstones, and the named SSE event `telemetry.update`
 - ⚪ PostgreSQL production rollout + multi-tower federation
 
 **Known boundaries** (protocol/data plane ready, feature wiring pending; full list in
@@ -534,6 +535,8 @@ macs/
 - 6.4.10 guardrails live: wake-loop freeze, done acceptance gate, circuit breaker, bounded context (LLM max-token cap), worker TTL watchdog
 - **Session-carrier workers implemented**: zcode / trae / DeepSeek Harness / claude code / codex as persistent carriers — sub-workers incubate inside the same session (task-level carrier affinity); process-tree termination landed (Unix process group / Windows taskkill /T /F)
 - Downlink wired: `task_cancelled` (rollback running workers) / `approval_result` / `template_updated` / `budget_changed`; `task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` constants ready, wire on demand
+- M2.6 gaps: no `lease_expires_at` subtask lease (only the global TTL watchdog; an incubator crash leaves subtasks stuck in `dispatched/running`); `FinishSubtask` has no `attempt_count + incubator_id` guard (a late old-attempt result can overwrite); cancelling in-flight subtasks is still fail-open (no tombstone); SSE frames use the default `message` event, so the DSH plugin's `telemetry.update` listener receives nothing
+- Known test defect: `macs-incubator` `TestSessionDriverLifecycle` uses a bash-script fake agent and fails on Windows (test portability; needs a per-platform rewrite)
 - 6.4.11 budgets enforced: task / global / incubator level (monthly window + budget_changed downlink); template level pending template-dispatch binding
 - 6.5 timers live: stale detection, ACK janitor, rebalance, worker TTL, spot-check retry, monthly budget reset, resource-snapshot cleanup
 - `fetch_request` large-content chunked transfer: protocol ready, unused while artifacts stay <256KB

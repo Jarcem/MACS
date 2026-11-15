@@ -837,17 +837,22 @@ UDP 下行指令类型全集（取代原"反向通道指令"）：
 
 **目标**：任何 `dispatched/running` 子任务都必须在有限时间内被回收；不允许孵化器崩溃、进程挂死或 ACK 丢失导致子任务永久卡在在途态。6.5 的全局 Worker TTL 只作为兜底，不能替代子任务级租约。
 
-**租约字段**（DB 设计 §2.3）：`attempt_count`（当前执行轮次）、`max_retries`（最大执行轮次，默认 3）、`lease_expires_at`（当前轮次租约到期时刻）。每次成功抢占即开始新 attempt，旧 attempt 的结果随即失效（见 6.4.3.2）。
+**租约字段**（DB 设计 §2.3）：`attempt_count`（当前执行轮次）、`max_retries`（含首发的最大执行轮次，塔侧默认写 3）、`lease_expires_at`（当前轮次租约到期时刻）。每次成功抢占即开始新 attempt，旧 attempt 的结果随即失效（见 6.4.3.2）。
 
 **租约时长**：
 
 ```
-lease_timeout = min(max(subtask.timeout_ms, 120s), 600s) + 30s
-lease_expires_at = claimed_at + lease_timeout
+base    = timeout_ms > 0 ? timeout_ms : (mode == session_agent ? 30min : 120s)
+ceiling = mode == session_agent ? 120min : 10min
+grace   = mode == session_agent ? 120s : 30s
+lease_timeout     = min(base, ceiling) + grace
+lease_expires_at  = claimed_at + lease_timeout
 ```
 
-- 子任务未声明 `timeout_ms` 时按 120s 计算；上限 600s，另加 30s 网络与结果回传宽限。
-- 续租（heartbeat 延长 `lease_expires_at`）属于后续增强；M2.6 不依赖续租即可保证正确性。
+- 普通子任务：未声明 `timeout_ms` 按 120s，上限 10min，另加 30s 网络与结果回传宽限。
+- **会话载体子任务（`session_agent`）必须放宽**：其会话超时口径为默认 30min、最长 120min（V3.5.9）；若沿用 10min 上限，健康的长会话会被 Watchdog 误判到期并重投，造成同一 session 重复执行。故 ceiling 提到 120min、宽限 120s。
+- 显式 `timeout_ms` 优先，但仍受各自 ceiling 约束。
+- 续租（heartbeat 延长 `lease_expires_at`）属于后续增强；上述口径不依赖续租即可保证正确性。
 
 **原子抢占**：`ClaimSubtask` 必须在一条 UPDATE 中完成状态推进、attempt 递增与租约设置，并清空上一轮执行产物，避免旧结果被误读：
 
@@ -865,45 +870,116 @@ WHERE id=? AND status='pending'
 
 | 回收条件 | 处理 | 事件 |
 | --- | --- | --- |
-| `attempt_count < max_retries` | 重置为 `pending`，清空 `incubator_id/worker_id/lease_expires_at/result/error`，等待重新调度 | `subtask_lease_expired`（action=retry） |
+| `attempt_count < max_retries` | 复用 E01 重试路径：标 `failed` + 写 `next_retry_at` 退避，清空 `incubator_id/worker_id/lease_expires_at`，由 `RequeueRetryable` 到点回池 | `subtask_lease_expired`（action=retry） |
 | `attempt_count >= max_retries` | 标记 `failed`，`error="lease expired after N attempts"`，走 E01 重试耗尽口径 | `subtask_lease_expired`（action=failed）+ 必要时 `task_finished` |
 
 回收后必须 `RecomputeTask`。与 E12/E15 的关系：孵化器失联时**不立即重派**在跑子任务，仍等租约到期再回收，避免原 Worker 恢复后产生重复执行。
+
+**与 6.5「Worker 超时清理」的重叠处理**：两条路径都可能命中同一在途子任务，以**先执行者**为唯一处理方；后执行者必须以 `status IN ('dispatched','running')` 为条件更新，命中已回收（`failed/pending/cancelled`）时不做任何写入，避免双写 retry 与双发事件。
+
+**与 E01 重试的唯一记账口径**：系统内只允许 `ClaimSubtask` 递增 `attempt_count`，任何重试路径都不得直接改写该字段，否则租约回收与 E01 会重复计数或绕过退避。
+
+| 路径 | 写入 | 说明 |
+| --- | --- | --- |
+| 执行失败（E01） | `FinishSubtask(failed)`；若 `attempt_count < max_retries` 追加 `next_retry_at = now + backoff(attempt_count)` | 不写 `attempt_count`；由 `RequeueRetryable` 到点回池 |
+| 租约到期（未耗尽） | 复用 E01 同一路径：`failed` + `next_retry_at` | **不直接置 `pending`**，避免出现第二套退避与第二处 attempt 记账 |
+| 租约到期（已耗尽） | `failed` 终态，`error="lease expired after N attempts"` | 走 E01 重试耗尽口径 |
+| 回池 | `RequeueRetryable` 仅置 `pending` | 只改状态，不动 attempt |
+| 重新下发 | `ClaimSubtask` | **唯一** attempt 递增点 |
+
+- 退避函数统一为 `backoff(n) = min(2^(n-1) × 5s, 60s)`，E01 与租约回收共用；`SetSubtaskRetry` 只允许写 `max_retries / next_retry_at`。
+- `max_retries` 语义统一为"含首发的最大执行轮次"：`max_retries=3` 表示最多执行 3 次。
+- 带 `next_retry_at` 的 `failed` 子任务视为"待重试"，`RecomputeTask` 不得据此判定 `partial_failure`；仅重试耗尽才计入任务失败。
+- 复核子任务（`kind=review`）同样受租约保护以防卡死，但租约到期**不重投**，直接标 `failed` 并交由 E04 打回/人工终审逻辑处理。
+
+**实现顺序要求**：先落地 attempt 唯一记账与租约回收，再切取消中断；否则取消/重投交错时会出现 attempt 与状态不一致。
 
 #### 6.4.3.2 执行结果幂等与终态保护（M2.6）
 
 `msg_id` 去重只能拦截同一报文重放，不能拦截“换 `msg_id` 重发”或“旧 attempt 迟到结果”。因此 `execution_result` 除信封幂等键外，必须携带 `{subtask_id, incubator_id, attempt_count, status}`，塔侧以**条件更新**作为最终幂等门：
 
 ```sql
+-- 普通执行子任务（kind <> 'review'）
 UPDATE subtasks
 SET status=?, result=?, error=?, worker_id=?, started_at=?, finished_at=?, updated_at=?
 WHERE id=?
   AND status IN ('dispatched','running')
   AND attempt_count=?
-  AND incubator_id=?
   AND attempt_count>0
+  AND incubator_id=?
 ```
+
+```sql
+-- 复核子任务（kind = 'review'）：兼容未 claim 的广播双跑回传
+UPDATE subtasks
+SET status=?, result=?, error=?, worker_id=?, started_at=?, finished_at=?, updated_at=?,
+    attempt_count=CASE WHEN attempt_count=0 THEN 1 ELSE attempt_count END
+WHERE id=?
+  AND status IN ('dispatched','running','pending')
+  AND attempt_count = ?
+  AND (incubator_id IS NULL OR incubator_id = ?)
+```
+
+来源状态与 attempt 门禁按子任务类型区分，二者不可合并：
+
+| 子任务类型 | 可收口来源状态 | attempt 门禁 | 说明 |
+| --- | --- | --- | --- |
+| 普通执行（`kind<>review`） | `dispatched/running` | `attempt_count = ? AND attempt_count > 0` | 必须经 `ClaimSubtask` 领取，`pending` 回传一律拒绝 |
+| 复核（`kind=review`） | `dispatched/running`；兼容 `pending` | `pending` 来源要求 `attempt_count=0`，收口时补记为 1 | `pending` 容错仅覆盖广播双跑中未 claim 的合法回传，且要求 `incubator_id` 为空或与回传方一致 |
 
 - 仅 `completed/failed` 是合法执行终态；其他 status 拒绝。
 - `RowsAffected=0` 表示重复结果、旧 attempt、错误孵化器或子任务已进入终态，统一按 `duplicate/stale` 忽略，可回 ACK 但**不得**改写结果、推进任务进度或重复落 cost/telemetry 副作用。
 - 已为 `cancelled/completed/failed` 的子任务不接受任何迟到结果；尤其禁止取消后被迟到结果“复活”。
+- 所有内部状态回写（质量管线推进 `review_pending/reviewing/in_spot_check`、复核放行 `completed`、打回 `pending`、dispatch 失败回滚置 `pending`）同样必须带状态门：`WHERE status <> 'cancelled'`。**不得**写成 `status NOT IN ('completed','failed')`——执行完成后再进入 `review_pending` 是合法迁移，误加会打断质量管线；也不得无条件写，否则取消后仍会被回滚成 `pending` 重新调度。
 - 广播仲裁 `worker_rollback` 与本节独立：rollback 解决重复孵化，attempt 条件解决结果写库幂等，两者不能互相替代。
+- 实现注意：现有 [HandleResult](file:///E:/LLM/DSH/macs/macs-tower/internal/orchestrator/orchestrator.go) 复核分支已接受 `pending`，改造时必须补 attempt / incubator 校验，而不是简单套用普通子任务的 SQL。
 
 #### 6.4.3.3 任务取消与在途执行中断（M2.6）
 
 `POST /api/v1/tasks/:id/cancel` 是**强制取消**，不是只停止后续调度。旧的“在途子任务 fail-open、不强制中断”口径不适用于用户显式取消；fail-open 仅用于塔侧故障时的可用性策略。
 
-**塔侧事务**：
+**塔侧事务**（顺序不可调换）：
 
 1. 任务已为 `completed/failed/cancelled` 时幂等返回 `changed=false`，不重复产生副作用。
-2. 将 `pending/ready/frozen/dispatched/running/review_pending/reviewing/in_spot_check` 子任务全部置 `cancelled`，任务置 `cancelled`。
-3. 收集取消前处于 `dispatched/running` 的 `{subtask_id, incubator_id, attempt_count}`，事务提交后向对应孵化器单播 `task_cancelled`，载荷为 `{task_id, subtask_id, attempt_count}`；ACK 按 6.4.8 notice 口径。
+2. **先收集**在途目标：同一事务内 `SELECT subtask_id, incubator_id, attempt_count FROM subtasks WHERE task_id=? AND status IN ('dispatched','running')`（或用 `UPDATE ... RETURNING`）。必须在置 `cancelled` 之前采集，否则第 3 步之后查不到任何在途行，取消指令发不出去。
+3. 将 `pending/ready/frozen/dispatched/running/review_pending/reviewing/in_spot_check` 子任务全部置 `cancelled`，任务置 `cancelled`。
+4. 事务提交后，向第 2 步收集到的每个目标单播 `task_cancelled`，载荷 `{task_id, subtask_id, attempt_count}`；ACK 按 6.4.8 notice 口径。
 
-**孵化器侧取消注册表**：维护 `executions: subtask_id → {attempt_count, cancel}` 与取消墓碑 `cancelled: subtask_id → max_cancelled_attempt`。
+**孵化器侧取消注册表**：维护 `executions: subtask_id → {attempt_count, cancel}`（进程内）与取消墓碑 `cancelled: subtask_id → max_cancelled_attempt`（**持久化**）。
 
 - `dispatch` 到达：若 `attempt_count <= cancelled[subtask_id]`，说明取消先于调度到达，禁止孵化，按 `duplicate/cancelled` 回 ACK。
 - `task_cancelled` 到达：若 attempt 匹配当前运行项，调用 `cancel()` 中断执行并抑制结果回传；若不匹配或尚未运行，只更新墓碑。重复取消必须幂等。
 - 执行结束：从注册表注销；已注销后的迟到 cancel 仅更新墓碑，不得影响新 attempt。
+
+**墓碑持久化（防止孵化器重启后取消失效）**：墓碑写入孵化器本地 SQLite 表 `cancel_tombstones(subtask_id PRIMARY KEY, max_attempt INT, created_at)`，保留 24h（大于最长租约窗口 120min+120s），启动时加载进内存 map；内存 map 仅作缓存，写路径先落库再更新缓存。
+
+**兜底不变量**：即使墓碑全部丢失，塔侧也已将子任务置 `cancelled`，任何迟到结果都会被 6.4.3.2 的条件更新拒绝，任务不可能被复活；墓碑只用于**省掉无意义的进程启动**，不是正确性的唯一依赖。
+
+**取消收尾口径**：
+
+| 对象 | 处理 |
+| --- | --- |
+| 在途子任务（`dispatched/running`） | 置 `cancelled` → 单播 `task_cancelled` → 孵化器按 attempt 中断进程树 |
+| 排队子任务（`pending/ready/frozen`） | 置 `cancelled`，不再进入调度 |
+| 质量中间态（`review_pending/reviewing/in_spot_check`） | 一律置 `cancelled`；其关联复核子任务同步 `cancelled` |
+| 关联未决审批 | 置 `expired`（reason=`task_cancelled`），不再阻塞任务 |
+| 已产生成本 | **不回收**：`cost_records` 保留真实消耗，供审计与预算对账 |
+| 归档 | 生成"取消归档"（`document_type=cancel`），不生成终审归档 |
+| 进度 | 冻结为取消时刻的聚合值；`cancelled` 不计入 `completed` |
+| 事件 | 任务级发 `task_cancelled`；每个子任务发 `subtask_finished`（`status=cancelled`），均走 SSE `telemetry.update` |
+
+**API 契约**：
+
+```http
+POST /api/v1/tasks/:id/cancel      # scope=ops
+
+200 {"id":"<task>","status":"cancelled","changed":true,
+     "cancelled_subtasks":7,"notified_incubators":["inc-a","inc-b"]}
+```
+
+- 幂等：任务已是 `completed/failed/cancelled` → 200 + `changed=false` + `cancelled_subtasks=0`。
+- 任务不存在 → 404；权限不足 → 403。
+- 返回的 `notified_incubators` 仅包含成功发出 `task_cancelled` 的目标；未 ACK 的目标不阻塞取消结果，由孵化器侧 `worker_rollback` 与墓碑兜底。
 
 **进程中断**：Worker 统一 `RunWithContext(ctx, job)`，CLI/HTTP Agent 必须继承该 ctx。Windows 下仅 `exec.CommandContext` 不够（默认只终止主进程），取消/超时时必须执行 `taskkill /T /F /PID <pid>` 终止进程树；Unix 使用独立进程组并向进程组发信号。平台差异用 build tag 隔离。被中断的 Worker 不上行 `completed/failed` 结果；塔侧已取消状态以 6.4.3.2 的条件更新兜底。
 
@@ -1370,7 +1446,7 @@ Worker 适配器层内置两类 API 协议驱动，与 CLI 型适配器（claude
      }
    }
 
-   同时 → SSE Stream:
+   同时 → SSE Stream（帧级规范见 §6.4.13.4.1）:
    {
      "event": "telemetry.update",
      "data": {"progress_percent": 35}
@@ -1434,6 +1510,42 @@ CREATE INDEX idx_telemetry_events_subtask ON telemetry_events(subtask_id, timest
 CREATE INDEX idx_telemetry_events_type ON telemetry_events(event_type);
 ```
 
+##### 6.4.13.4.1 SSE 帧规范（M2.6 · 契约）
+
+端点 `GET /api/v1/telemetry/stream` 的帧级格式，服务端与所有客户端（web / DSH 插件）必须一致实现。
+
+**响应头**：
+
+```http
+Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache
+Connection: keep-alive
+X-Accel-Buffering: no
+```
+
+**帧格式**（每帧以空行结束）：
+
+```text
+id: <telemetry_events 自增 id 或单调递增序号>
+event: telemetry.update
+data: {"event_type":"telemetry.update","task_id":"...","subtask_id":"...","worker_id":"...","progress_percent":35,"current_step":"retrieval","token_usage":{"prompt":1024,"completion":256},"ts":"2026-11-15T10:00:00Z"}
+
+```
+
+**规则**：
+
+| 项 | 规定 |
+| --- | --- |
+| 事件名 | 固定为 `telemetry.update`；子类型由 `data.event_type` 区分（遥测增量 / 子任务状态 / Worker 状态 / 任务状态） |
+| `id` | 必须输出，取 `telemetry_events` 自增 id；用于断线回放 |
+| 心跳 | 每 15s 发送注释行 `: heartbeat\n\n`，不触发客户端事件 |
+| 断线重连 | 客户端 5s 后重连并带 `Last-Event-ID`；服务端先回放该 id 之后最近 ≤200 条 `telemetry_events`，再切实时流；无 `Last-Event-ID` 不回放 |
+| 客户端订阅 | **必须** `addEventListener('telemetry.update', ...)`；不得依赖 `onmessage`（默认 `message` 事件不会收到命名事件） |
+| 慢客户端 | 单连接未消费队列上限 256 帧，超限主动断开，由客户端重连回放，避免阻塞塔 |
+| 鉴权 | 与其余 REST 一致（read scope）；SSE 不接受写操作 |
+
+> 该规范取代此前只约定"事件名"的口径；实现与客户端订阅必须同时落地，否则 DSH 插件实时面板收不到任何帧。
+
 ##### 6.4.13.5 平台适配器开发规范（契约）
 
 所有接入 MACS 的 Agent 平台需实现以下标准接口：
@@ -1486,7 +1598,7 @@ CREATE INDEX idx_telemetry_events_type ON telemetry_events(event_type);
 | 孵化器超时检测 | 每分钟 | 检查 UDP 上报超时的孵化器，标记为 offline | 超过 3 个上报周期未收到消息 = 离线 |
 | 调度 ACK 重传监控 | 每 10 秒 | 扫描未收到 ACK 的调度包并重传（见 6.4.8 `ackRetransmitTick`） | 200ms/500ms/1s，最多 3 次；仍失败标记孵化器不可达 |
 | 全局负载再平衡 | 每 30 秒 | 检测过载孵化器，回收未下发子任务重调度 | 负载均值 > 0.85 触发（见 6.4.7 rebalanceTick） |
-| 子任务租约回收 | 每 5 秒 | 回收 `lease_expires_at` 到期的 dispatched/running 子任务（见 6.4.3.1） | 未耗尽 attempt 回池重试；耗尽标 failed；确定性注入 `now` |
+| 子任务租约回收 | 每 5 秒 | 回收 `lease_expires_at` 到期的 dispatched/running 子任务（见 6.4.3.1） | 未耗尽 → `failed` + 退避后回池；耗尽 → `failed` 终态；确定性注入 `now` |
 | Worker 超时清理 | 每分钟 | 清理超过 TTL 的 Worker，强制销毁（全局兜底，不替代子任务租约） | 销毁 + 释放槽位 + 子任务标记 failed + 重试 |
 | 抽查重试调度 | 每分钟 | 检查需要重试的抽查任务 | 指数退避（见 6.4.5） |
 | 预算月度重置 | 每月 1 号 00:00 UTC | 重置月度预算 | 重置 spent_monthly_cents = 0 |
@@ -1666,7 +1778,7 @@ Admin Token 三级 scope：`read`（监控只读）/ `ops`（任务创建、审�
 | 编号 | 场景 | 触发条件 | 处理策略 |
 | --- | --- | --- | --- |
 | E01 | 子任务执行失败 | Worker 执行返回非零退出码 / 异常 | 该子任务标记 failed，不影响其他并行子任务；按 `max_retries` 自动重试（指数退避）；重试耗尽则升级父任务为 `partial_failure` |
-| E02 | Worker 超时/崩溃 | Worker 运行超过 TTL / 进程意外退出 / 无响应 / 子任务租约到期 | Spawner 强制销毁进程树 + 释放并发槽；租约到期按 6.4.3.1 回收：attempt 未耗尽回 `pending` 重试，耗尽标 failed；连续 3 次崩溃的模板标记为不稳定 |
+| E02 | Worker 超时/崩溃 | Worker 运行超过 TTL / 进程意外退出 / 无响应 / 子任务租约到期 | Spawner 强制销毁进程树 + 释放并发槽；租约到期按 6.4.3.1 回收：未耗尽 attempt 则 `failed + next_retry_at` 退避后由 `RequeueRetryable` 回池，耗尽则 `failed` 终态；连续 3 次崩溃的模板标记为不稳定 |
 | E03 | 调度塔不可达（离线） | 本机 UDP 上报无响应 / 网络中断 | 本地任务继续执行；所有上报事件写入 `sync_outbox`；重试策略按 6.4.5 指数退避；恢复后自动批量同步 |
 | E04 | 复核不通过 | 复核 Worker 输出 rejected | 打回执行 Worker 重新执行 + 自检；复核不通过的轮次 +1；达到最大轮次（默认 3 轮）则标记为失败 + 触发人工审批 |
 | E05 | 抽查不通过 | 云端抽查发现问题 | 单条不通过 → 扩大抽查范围；系统性问题 → 整任务打回复核；严重问题 → 升级 `human_final` 人工终审 |
@@ -1695,7 +1807,7 @@ Admin Token 三级 scope：`read`（监控只读）/ `ops`（任务创建、审�
 | 集成测试 | 端到端链路 | UDP 注册 → 广播调度 → Worker 孵化 → 执行 → 单播上报 → 状态更新 → 归档全链路 |
 | 并发测试 | 并行执行 | 多子任务并发 + 共享工作区文件锁 + 本机并发槽控制 + 多孵化器同时承接正确性 |
 | 幂等测试 | 所有写操作 | 上报重放 ×100 零副作用；事件重放零重复；调度消息重传零重复孵化；旧 attempt/换 msg_id 的 execution_result 不覆盖终态 |
-| 租约测试 | 子任务超时回收 | 注入固定 `now`：到期第一次回池重试、耗尽 `max_retries` 标 failed、未到期不误回收、取消任务不被回收 |
+| 租约测试 | 子任务超时回收 | 注入固定 `now`：到期 → `failed`+退避 → 到点回池；耗尽 `max_retries` 标 failed 终态；未到期不误回收；取消任务不被回收；session_agent 长会话不误判 |
 | 取消测试 | 任务与进程中断 | pending 与在途子任务均 cancelled；cancel 先于/后于 dispatch 均幂等；长跑 CLI 进程树终止；迟到结果不复活任务 |
 | 网络测试 | UDP 可靠性 | 模拟丢包 5%/20%/50% 下 ACK+重传的可达性；广播风暴下的幂等承接（E16） |
 | 异常测试 | E01~E17 | 逐条验证异常处理策略符合第十一章定义 |
@@ -1840,7 +1952,7 @@ Admin Token 三级 scope：`read`（监控只读）/ `ops`（任务创建、审�
 | `heartbeat` | 周期性状态与资源上报 | 单播上行 |
 | `report` | 子任务/事件批量上报（≤10 条/包） | 单播上行 |
 | `fetch_request` | 请求大内容（模板/任务详情）分片传输 | 单播上行（转 HTTPS） |
-| `execution_result` | Worker 执行结果上报（V3.0，含遥测指标与产物指纹） | 单播上行 |
+| `execution_result` | Worker 执行结果上报（V3.0，含遥测指标、产物指纹；M2.6 必带 `attempt_count` 与 `incubator_id`，用于终态条件更新） | 单播上行 |
 | `telemetry_stream` | 实时遥测指标推送（V3.0，token_usage / progress / cost） | 单播上行 |
 | `platform_event` | 平台原生事件上报（V3.0，如 AutoGen message_published、LangChain chain_invoked） | 单播上行 |
 | `cmd_result` | 指令执行回执（exit_code / stdout / stderr 截断 64KB / duration_ms，V3.4 模块 #32） | 单播上行 |
@@ -1851,7 +1963,7 @@ Admin Token 三级 scope：`read`（监控只读）/ `ops`（任务创建、审�
 
 | type | 用途 | 方向 |
 | --- | --- | --- |
-| `dispatch` | 调度下发（新任务/子任务分配） | 广播 或 单播 |
+| `dispatch` | 调度下发（新任务/子任务分配；M2.6 载荷必带 `attempt_count`，孵化器回传时原样带回） | 广播 或 单播 |
 | `dispatch_commit` | 广播承接锁定通知（其余候选停止应答、不孵化） | 广播 |
 | `task_cancelled` | 强制取消任务/在途子任务（M2.6 §6.4.3.3；payload `{task_id, subtask_id, attempt_count}`，孵化器按 attempt 中断进程树） | 单播（在途目标）或广播 |
 | `task_updated` | 任务定义更新 | 广播 或 单播 |
@@ -1890,6 +2002,7 @@ Admin Token 三级 scope：`read`（监控只读）/ `ops`（任务创建、审�
 | GET | `/api/v1/tasks/:id/dag` | 子任务 DAG：subtasks + dependencies + parallel_groups（V3.2，§14.3） |
 | GET | `/api/v1/tasks/:id/workers` | 子 Worker 状态投影（V3.2，§14.5 口径，由遥测/上报事件读取侧合成，不建独立云端 Worker 表） |
 | GET | `/api/v1/tasks/:id/events` | Agent 间汇报 feed：report 事件 + platform_event，时间倒序分页（V3.2，§14.6） |
+| POST | `/api/v1/tasks/:id/cancel` | 强制取消任务：在途子任务置 cancelled + `task_cancelled` 单播中断进程树（M2.6 §6.4.3.3，scope=ops） |
 
 > V3.0 起 `POST /api/v1/tasks` 请求体支持扩展字段：`agent_platform`（指定 Agent 平台）、`adapter_config`（适配器配置）、`required_protocol_driver`（协议驱动协商，见 6.4.13.6）；不传则按默认平台与驱动调度。
 
@@ -1961,6 +2074,7 @@ Admin Token 三级 scope：`read`（监控只读）/ `ops`（任务创建、审�
 | V3.5.7 | 2026-11-15 | — | **M2.6 任务生命周期止血设计补齐**（仅设计，实现待落地）：新增 6.4.3.1 子任务租约与超时回收（`lease_expires_at`、attempt 递增、确定性 Watchdog 每 5s 回收重试/失败）；6.4.3.2 执行结果幂等与终态保护（`status + attempt_count + incubator_id` 条件更新，拦截换 msg_id 重发与旧 attempt 迟到结果）；6.4.3.3 任务取消与在途执行中断（`task_cancelled` 单播 payload、孵化器取消注册表与取消墓碑、Windows `taskkill /T /F` 与 Unix 进程组）；6.5 增租约回收定时任务；E02/E07 扩展并新增 E17；12.1 增租约/取消测试；附录 B.1 明确 `task_cancelled` 强制取消语义 |
 | V3.5.8 | 2026-11-15 | — | **对照表待实现清单第二轮落地**（实现）：6.4.11 孵化器级预算强制（当月成本超上界 → 选机硬过滤 + budget_changed 状态翻转通知一次；孵化器侧 limit_version 单调门 + suspended 拒新 ACK rejected 改派他机）+ 6.5 预算月度重置（月滚动清零模板累计 + 广播解除）；6.4.3 下行接线（task_cancelled → 在跑子任务 worker_rollback + 孵化器通知 / approval_result 关联孵化器定向 / template_updated 创建广播；M2.6 强制取消在途与取消墓碑仍待 6.4.3.3 落地）；迁移 0006 规范化建表（subtask_dependencies uk / parallel_groups 依赖层数 / incubator_resources 快照 + 7 天清理）+ E10 通用 DFS 环检测；6.4.10 有界上下文（LLM max_tokens 孵化器硬顶 MACS_MAX_TOKENS_CAP 默认 8192）；§6.4.17 C7 cmdterm 审计 90 天轮转；12.1 网络测试（E16 广播仲裁并发正确性：回环真实 UDP 三候选竞速唯一承接者）。对照表 §五 收缩，README 已知边界同步 |
 | V3.5.9 | 2026-11-15 | — | **会话载体 Worker + 进程树终止**（§6.4.9 CLI Native 扩展 + M2.6 §6.4.3.3 部分）：cli_agent 升级 session_agent 模式——zcode / trae / DeepSeek Harness / claude code / codex 等终端 Agent 作为持久载体，子 Worker 在同一 session 内连续孵化（上下文累积）：claude 预设（-p/--output-format json/--resume 自动装配）+ generic 显式模板驱动（start_args/resume_args，{{text}}/{{deps}}/{{session}} 占位，覆盖 zcode/dsh/trae）；塔侧任务级 carrier 亲和（tasks.carrier_incubator/carrier_session，迁移 0007；同任务子 Worker 钉在首台孵化器同一 session，载体离线回退新会话）；进程树终止落地（Unix Setpgid 进程组 SIGKILL / Windows taskkill /T /F，超时与取消时 Agent 内部子进程一并清理，M2.6 §6.4.3.3 部分落地）；孵化器门禁 MACS_ALLOW_SESSION_AGENT（默认关）；会话超时独立口径（默认 30min 上限 120min）；E16 广播仲裁并发测试（回环真实 UDP 竞速唯一承接者 + dispatch_log 首确认终态保护——duplicate 不降级 acked/failed） |
+| V3.5.10 | 2026-11-15 | — | **M2.6 设计闭环补全**（仅设计）：6.4.3.1 增「唯一记账口径」——attempt_count 仅由 ClaimSubtask 递增，租约到期复用 E01 的 failed+next_retry_at 退避（不直接置 pending），统一 backoff(n)=min(2^(n-1)×5s,60s)，max_retries 语义统一为含首发；带 next_retry_at 的 failed 不判 partial_failure；复核子任务受租约保护但不重投。6.4.3.2 按子任务类型拆分条件更新（普通 vs 复核），复核兼容 pending 来源的 attempt/incubator 门禁，质量中间态推进加状态门。6.4.3.3 增取消墓碑持久化（本地 cancel_tombstones 表 + 24h 保留 + 启动加载）与"墓碑非正确性唯一依赖"的兜底不变量，补齐取消收尾口径（成本不回收/取消归档/审批作废/进度冻结/事件）与 API 契约（scope=ops、changed、cancelled_subtasks、notified_incubators）；附录 B.1 增 `POST /api/v1/tasks/:id/cancel`，并在 `dispatch`/`execution_result` 标注必带 `attempt_count`；租约上限按 mode 区分（`session_agent` 120min + 120s 宽限，防长会话被误回收）；取消事务明确“先收集在途目标再置 cancelled”的顺序；Worker TTL 与租约重叠以先执行者为唯一处理方。新增 6.4.13.4.1 SSE 帧规范（响应头、id/event/data 行、15s 心跳、Last-Event-ID 回放 ≤200、addEventListener 要求、慢客户端 256 帧上限） |
 
 > 铁律：正文改净、此处记账。禁止把最终口径只写在这里。
 

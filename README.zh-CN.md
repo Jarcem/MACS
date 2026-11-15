@@ -551,6 +551,7 @@ macs/
 - ✅ **M6 统一 Agent 平台协议**：协议驱动注册与能力映射三表 + OpenAI/Anthropic 协议驱动（孵化器侧凭据注入 + usage 回填成本）+ 遥测事件（telemetry_events + SSE）
 - ✅ **M7 DSH 监控终端**：Ink TUI 只读监控（REST/SSE 数据源，对齐 Web 看板）
 - ✅ **M8 命令终端**：每终端独立密钥 + HMAC 签发（60s 时间窗防重放）+ 白名单执行 + 注册 ACK 重试 + 审计双写对账 + 密钥轮换（10 分钟双验）
+- 🟡 **M2.6 任务生命周期止血（进行中）**：已落地 `task_cancelled` 单播下行（在跑子任务 `worker_rollback`）+ 进程树终止（Unix 进程组 / Windows `taskkill /T /F`）+ 会话载体 Worker；**待做**：子任务租约与确定性 Watchdog、执行结果终态保护（`attempt_count + incubator_id` 条件更新）、在途强制取消与取消墓碑、SSE 命名事件 `telemetry.update`
 - ⚙️ **后续迭代**：AI 语义拆解、TCP 兜底通道、模板市场、多租户（见主设计 §3.3 范围三态）
 
 **已知边界**（协议/数据面已就绪、特性未接线的部分；完整清单见
@@ -559,6 +560,8 @@ macs/
 - 6.4.10 护栏：唤醒环冻结 / done 验收门 / 断路器 / 有界上下文 / Worker TTL 看门狗已实现；空闲下岗由 TTL 看门狗等价覆盖
 - **会话载体 Worker 已实现**：zcode / trae / DeepSeek Harness / claude code / codex 作为持久载体，子 Worker 在同一 session 内连续孵化（任务级 carrier 亲和）；进程树终止（Unix 进程组 / Windows taskkill /T /F）落地
 - 下行指令 `task_cancelled` / `approval_result` / `template_updated` / `budget_changed` 已接线；`task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` 协议常量就绪待适用
+- M2.6 未闭环项：子任务无 `lease_expires_at` 租约（仅靠全局 TTL 兜底，孵化器崩溃会卡在 `dispatched/running`）；`FinishSubtask` 未做 `attempt_count + incubator_id` 条件更新（旧 attempt 迟到结果可覆盖）；取消在途子任务仍 fail-open（无取消墓碑）；SSE 事件名为默认 `message`，DSH 插件监听的 `telemetry.update` 收不到
+- 已知测试缺陷：`macs-incubator` 的 `TestSessionDriverLifecycle` 使用 bash 脚本伪工具，在 Windows 下失败（测试可移植性问题，需按平台改写）
 - 6.4.11 预算：任务级/全局/孵化器级已强制（月度窗口 + budget_changed 下行）；模板级待模板↔派发绑定打通
 - 6.5 定时任务：超时检测/ACK 兜底/再平衡/Worker TTL/抽查重试/预算月度重置/资源快照清理已实现
 - `fetch_request` 大内容分片传输：协议就绪，当前产物均 <256KB 未启用
