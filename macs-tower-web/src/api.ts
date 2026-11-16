@@ -174,6 +174,15 @@ export const api = {
   taskDetail: (id: string) => get<{ data: { task: Task; cost_cents: number; traces: { id: string; subtask_id: string; to_id: string; fingerprint: string; depth: number }[] } }>(`/api/v1/tasks/${id}`),
   taskDag: (id: string) => get<{ data: { subtasks: { id: string; title: string; status: string; depends_on: string; kind: string; incubator_id: string; fingerprint: string; quality_status: string; review_round: number; attempt_count: number; started_at: string; finished_at: string }[]; dependencies: { from: string; to: string }[] } }>(`/api/v1/tasks/${id}/dag`),
   configSwitches: () => get<{ data: { key: string; current: unknown; default: unknown; on_effect: string; off_effect: string; boundary: string; source: string }[] }>('/api/v1/config'),
+  patchConfig: (key: string, value: unknown) =>
+    fetch('/api/v1/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('macs_token') ?? ''}` },
+      body: JSON.stringify({ key, value }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`PATCH config -> ${res.status}`);
+      return res.json();
+    }),
   enums: () => get<Record<string, unknown>>('/api/v1/enums'),
 
   // M8 命令终端

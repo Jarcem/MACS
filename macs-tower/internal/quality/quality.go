@@ -10,6 +10,7 @@ package quality
 
 import (
 	"encoding/json"
+	"sync"
 	"fmt"
 	"log"
 	"math/rand"
@@ -38,6 +39,8 @@ type Service struct {
 	arch  *archive.Service
 	appr  *approvals.Service
 	cfg   Config
+	// 运行时配置覆盖层（§7.3 在线编辑；key → value，优先于 cfg 结构体字段）
+	cfgOv sync.Map
 	kick  func() // 唤醒编排器（复核子任务入列后）
 	onSpotFinished   func(taskID, status string) // 抽查收口回调（编排器注册）
 	onSubtaskFinal   func(taskID string)         // 复核放行后任务重算收口回调（编排器注册）
@@ -45,6 +48,31 @@ type Service struct {
 
 func New(st *store.Store, hub *events.Hub, tr *trace.Service, arch *archive.Service, appr *approvals.Service, cfg Config, kick func()) *Service {
 	return &Service{st: st, hub: hub, trace: tr, arch: arch, appr: appr, cfg: cfg, kick: kick}
+}
+
+// cfgBool 布尔配置读取：覆盖层优先，回退启动值（§7.3 在线编辑）
+func (s *Service) cfgBool(key string, fallback bool) bool {
+	if v, ok := s.cfgOv.Load(key); ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return fallback
+}
+
+// cfgInt 整数配置读取
+func (s *Service) cfgInt(key string, fallback int) int {
+	if v, ok := s.cfgOv.Load(key); ok {
+		if n, ok := v.(float64); ok {
+			return int(n)
+		}
+	}
+	return fallback
+}
+
+// SetCfgOverride 运行时设置配置覆盖（PATCH /api/v1/config 调用）
+func (s *Service) SetCfgOverride(key string, val any) {
+	s.cfgOv.Store(key, val)
 }
 
 // OnSpotFinished 注册抽查收口回调（编排器据此终结任务）
@@ -113,7 +141,7 @@ func (s *Service) OnExecutionResult(sub store.Subtask) (done bool) {
 		return true // 由编排器按 E01 重试
 	}
 
-	if !s.cfg.ReviewEnabled || !reviewable(sub) {
+	if !s.cfgBool("feature.review.enabled", s.cfg.ReviewEnabled) || !reviewable(sub) {
 		return true
 	}
 	if err := s.spawnReview(sub); err != nil {
@@ -201,7 +229,7 @@ func (s *Service) OnReviewResult(review store.Subtask, verdict string, note stri
 
 	// E04：复核不通过 → 打回重执行（≤Q5 3 轮），超轮次 failed + 人工审批
 	next := original.Round + 1
-	if next <= s.cfg.MaxReviewRounds {
+	if next <= s.cfgInt("max_review_rounds", s.cfg.MaxReviewRounds) {
 		_ = s.st.SetSubtaskReviewRound(original.ID, next)
 		_ = s.st.SetSubtaskRetry(original.ID, 0, original.MaxRetries, "") // 重新计数，由编排器重派
 		_ = s.st.SetSubtaskStatus(original.ID, "pending", "")
@@ -225,10 +253,10 @@ func (s *Service) OnReviewResult(review store.Subtask, verdict string, note stri
 
 // ShouldSample Q7 抽样比例判定（任务完成边界调用）
 func (s *Service) ShouldSample() bool {
-	if !s.cfg.SpotCheckEnabled || s.cfg.SpotCheckRatio <= 0 {
+	if !s.cfgBool("feature.spot_check.enabled", s.cfg.SpotCheckEnabled) || s.cfgInt("spot_check.ratio", s.cfg.SpotCheckRatio) <= 0 {
 		return false
 	}
-	return rand.Intn(100) < s.cfg.SpotCheckRatio
+	return rand.Intn(100) < s.cfgInt("spot_check.ratio", s.cfg.SpotCheckRatio)
 }
 
 // RaiseSpotCheck 任务抽查立案（scope=task，核验项=追溯链指纹对账）

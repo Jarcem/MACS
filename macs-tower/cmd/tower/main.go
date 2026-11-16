@@ -967,14 +967,21 @@ func main() {
 			Boundary  string `json:"boundary"`
 			Source    string `json:"source"`
 		}
+		// 覆盖层生效值优先于启动值（在线编辑后实时反映）
+		current := func(key string, startVal any) any {
+			if v, ok := orch.GetCfgOverride(key); ok {
+				return v
+			}
+			return startVal
+		}
 		rows := []switchRow{
-			{"feature.review.enabled", qualCfg.ReviewEnabled, true, "复核 Worker 孵化", "仅自检+抽查", "只影响复核孵化", "MACS_FEATURE_REVIEW"},
-			{"feature.spot_check.enabled", qualCfg.SpotCheckEnabled, false, "云端抽查（E06 对账）", "仅自检+复核", "只拦截抽查触发", "MACS_FEATURE_SPOT_CHECK"},
-			{"spot_check.ratio", qualCfg.SpotCheckRatio, 20, "抽样比例 %", "-", "Q7 口径", "MACS_SPOT_CHECK_RATIO"},
-			{"udp.broadcast_mode.enabled", cfg.BroadcastEnabled, true, "广播 first-ACK-wins", "点名单播", "只影响新调度", "MACS_BROADCAST_ENABLED"},
-			{"cluster.rebalance.enabled", cfg.RebalanceEnabled, true, "30s 再平衡（0.85 高水位）", "静态分配", "不迁移在跑子任务", "MACS_REBALANCE_ENABLED"},
+			{"feature.review.enabled", current("feature.review.enabled", qualCfg.ReviewEnabled), true, "复核 Worker 孵化", "仅自检+抽查", "只影响复核孵化", "MACS_FEATURE_REVIEW"},
+			{"feature.spot_check.enabled", current("feature.spot_check.enabled", qualCfg.SpotCheckEnabled), false, "云端抽查（E06 对账）", "仅自检+复核", "只拦截抽查触发", "MACS_FEATURE_SPOT_CHECK"},
+			{"spot_check.ratio", current("spot_check.ratio", qualCfg.SpotCheckRatio), 20, "抽样比例 %", "-", "Q7 口径", "MACS_SPOT_CHECK_RATIO"},
+			{"udp.broadcast_mode.enabled", current("udp.broadcast_mode.enabled", cfg.BroadcastEnabled), true, "广播 first-ACK-wins", "点名单播", "只影响新调度", "MACS_BROADCAST_ENABLED"},
+			{"cluster.rebalance.enabled", current("cluster.rebalance.enabled", cfg.RebalanceEnabled), true, "30s 再平衡（0.85 高水位）", "静态分配", "不迁移在跑子任务", "MACS_REBALANCE_ENABLED"},
 			{"worker.ttl", int(cfg.SubtaskTTL.Minutes()), 30, "超时销毁 + E01 重试", "-", "Q3 口径", "MACS_SUBTASK_TTL_MIN"},
-			{"worker.max_retries", cfg.MaxRetries, 3, "E01 重试上限", "-", "指数退避 30s×2^n", "MACS_MAX_RETRIES"},
+			{"worker.max_retries", current("worker.max_retries", cfg.MaxRetries), 3, "E01 重试上限", "-", "指数退避 30s×2^n", "MACS_MAX_RETRIES"},
 			{"budget.limit_enforce", true, true, "多级预算 + 塔侧上界强制（E09）", "只记账告警", "不影响在跑收尾", "常开（M5）"},
 			{"reliability.circuit_breaker", true, true, "连续 5 次失败熔断 60s", "-", "guardrail_events 落账", "常开（V3.5.4）"},
 			{"done_acceptance_mode", "strict", "strict", "自检严格门", "advisory 带缺陷提交", "只作用于自检提交边界", "常开（M3）"},

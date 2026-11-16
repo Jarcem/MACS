@@ -101,6 +101,8 @@ type Orchestrator struct {
 	cancelledSubtasks  int
 	notifiedIncubators []string
 	lastCancelledTask  string
+	// 运行时配置覆盖层（§7.3 配置开关在线编辑；key → value，优先于 cfg 结构体字段）
+	cfgOverrides sync.Map
 }
 
 func New(st *store.Store, disp *dispatcher.Dispatcher, hub *events.Hub,
@@ -225,6 +227,39 @@ func (o *Orchestrator) checkIncubatorBudgets(incs []store.Incubator) {
 	}
 }
 
+// cfgBool 读取布尔配置：运行时覆盖层优先，回退启动值（§7.3 在线编辑口径）
+func (o *Orchestrator) cfgBool(key string, fallback bool) bool {
+	if v, ok := o.cfgOverrides.Load(key); ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return fallback
+}
+
+// cfgInt 读取整数配置
+func (o *Orchestrator) cfgInt(key string, fallback int) int {
+	if v, ok := o.cfgOverrides.Load(key); ok {
+		if n, ok := v.(float64); ok {
+			return int(n)
+		}
+		if n, ok := v.(int); ok {
+			return n
+		}
+	}
+	return fallback
+}
+
+// SetCfgOverride 运行时设置配置覆盖（PATCH /api/v1/config 调用）
+func (o *Orchestrator) SetCfgOverride(key string, val any) {
+	o.cfgOverrides.Store(key, val)
+}
+
+// GetCfgOverride 读取运行时覆盖值（GET /api/v1/config 展示生效值）
+func (o *Orchestrator) GetCfgOverride(key string) (any, bool) {
+	return o.cfgOverrides.Load(key)
+}
+
 // budgetSuspendedFor 孵化器是否因预算暂停承接（选机硬过滤）
 func (o *Orchestrator) budgetSuspendedFor(id string) bool {
 	v, ok := o.budgetSuspended.Load(id)
@@ -291,7 +326,7 @@ func (o *Orchestrator) watchdog() {
 
 // rebalancer 每 30s（6.4.7 rebalanceTick）：过载孵化器（load>0.85）标记 overloaded；负载回落回 online
 func (o *Orchestrator) rebalancer() {
-	if !o.cfg.RebalanceEnabled {
+	if !o.cfgBool("cluster.rebalance.enabled", o.cfg.RebalanceEnabled) {
 		return
 	}
 	t := time.NewTicker(30 * time.Second)
@@ -831,7 +866,7 @@ func (o *Orchestrator) dispatch(candidates []*store.Incubator, s store.Subtask, 
 
 	def := o.taskDef(s)
 	var err error
-	if o.cfg.BroadcastEnabled && len(candidates) > 1 {
+	if o.cfgBool("udp.broadcast_mode.enabled", o.cfg.BroadcastEnabled) && len(candidates) > 1 {
 		_, err = o.disp.DispatchBroadcast(ctx, candidates, s.ID, def, attempt)
 	} else {
 		for _, c := range candidates {
@@ -860,7 +895,7 @@ func (o *Orchestrator) failSubtask(sub store.Subtask, reason string) {
 	_ = o.st.FinishSubtask(sub.ID, "failed", sub.Result, reason, sub.WorkerID, sub.StartedAt, sub.Fingerprint)
 	maxRetries := sub.MaxRetries
 	if maxRetries <= 0 {
-		maxRetries = o.cfg.MaxRetries
+		maxRetries = o.cfgInt("worker.max_retries", o.cfg.MaxRetries)
 	}
 	backoff := o.cfg.RetryBaseBackoff * time.Duration(math.Pow(2, float64(sub.AttemptCount)))
 	if backoff > 10*time.Minute {

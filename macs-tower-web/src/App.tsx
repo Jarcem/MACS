@@ -454,29 +454,88 @@ function TaskDetail({ id, onClose }: { id: string; onClose: () => void }) {
   );
 }
 
-// ── 运维平面 · 配置开关面板（UI §7.3 /ops/config：当前值/默认值/语义/边界）──
+// ── 运维平面 · 配置开关面板（UI §7.3 /ops/config：在线编辑 + 当前值/默认值/语义/边界）──
 function ConfigPanel({ compact }: { compact?: boolean }) {
-  const { data, err } = usePoll(() => api.configSwitches(), 15000);
-  const rows = data?.data ?? [];
+  const { data, err, refresh } = usePoll(() => api.configSwitches(), 15000);
+  const rows = (data?.data ?? []) as Array<{
+    key: string; current: unknown; default: unknown;
+    on_effect: string; off_effect: string; boundary: string; source: string;
+  }>;
+  const [editKey, setEditKey] = useState('');
+  const [editVal, setEditVal] = useState('');
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const save = async (key: string, val: unknown) => {
+    setBusy(key);
+    setMsg(null);
+    try {
+      await api.patchConfig(key, val);
+      setMsg(`✓ ${key} 已更新`);
+      refresh();
+    } catch (x) {
+      setMsg(String((x as Error).message ?? x));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const toggleBool = (key: string, cur: unknown) => save(key, !cur);
+  const saveInt = (key: string, val: string) => {
+    const n = parseInt(val, 10);
+    if (!isNaN(n)) save(key, n);
+  };
+
   return (
-    <Panel title="配置开关与灰度" note="/ops/config · 当前值 / 默认值 / 语义 / 拦截边界">
+    <Panel title="配置开关与灰度" note="/ops/config · 在线编辑（当前值 / 默认值 / 语义 / 拦截边界）">
+      {msg && <p className="hud-completed" style={{ fontSize: 11 }}>{msg}</p>}
       {rows.length === 0 ? <Empty err={err} /> : (
         <table className="hud-table">
           <thead>
-            <tr><th>开关</th><th>当前</th><th>默认</th><th>开效果</th><th>关效果</th><th>拦截边界</th><th>来源</th></tr>
+            <tr><th>开关</th><th>当前</th><th>默认</th><th>开效果</th><th>关效果</th><th>拦截边界</th><th>操作</th></tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
-              <tr key={r.key}>
-                <td className="mono-dim">{r.key}</td>
-                <td className={String(r.current) === String(r.default) ? 'hud-completed' : 'hud-warn'}>{String(r.current)}</td>
-                <td className="mono-dim">{String(r.default)}</td>
-                <td>{r.on_effect}</td>
-                <td>{r.off_effect}</td>
-                <td className="mono-dim">{r.boundary}</td>
-                <td className="mono-dim">{r.source}</td>
-              </tr>
-            ))}
+            {rows.map((r) => {
+              const isBool = typeof r.current === 'boolean' || r.current === 'true' || r.current === 'false';
+              const isNum = typeof r.current === 'number';
+              return (
+                <tr key={r.key}>
+                  <td className="mono-dim">{r.key}</td>
+                  <td>
+                    {isBool ? (
+                      <button className={`hud-btn${r.current ? ' hud-btn-active' : ''}`}
+                        onClick={() => toggleBool(r.key, r.current)}
+                        disabled={busy === r.key}>
+                        {r.current ? 'ON' : 'OFF'}
+                      </button>
+                    ) : (
+                      <span className={String(r.current) === String(r.default) ? 'hud-completed' : 'hud-warn'}>
+                        {String(r.current)}
+                      </span>
+                    )}
+                  </td>
+                  <td className="mono-dim">{String(r.default)}</td>
+                  <td>{r.on_effect}</td>
+                  <td>{r.off_effect}</td>
+                  <td className="mono-dim">{r.boundary}</td>
+                  <td>
+                    {isBool ? (
+                      <button className="hud-btn" disabled={busy === r.key}
+                        onClick={() => toggleBool(r.key, r.current)}>
+                        切换
+                      </button>
+                    ) : (
+                      <input
+                        defaultValue={String(r.current)}
+                        style={{ width: 50, fontSize: 11 }}
+                        onBlur={(e) => save(r.key, parseInt(e.target.value, 10) || 0)}
+                        onKeyDown={(e) => e.key === 'Enter' && save(r.key, parseInt((e.target as HTMLInputElement).value, 10) || 0)}
+                      />
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}
