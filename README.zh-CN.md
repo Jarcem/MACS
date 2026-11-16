@@ -552,7 +552,7 @@ macs/
 - ✅ **M6 统一 Agent 平台协议**：协议驱动注册与能力映射三表 + OpenAI/Anthropic 协议驱动（孵化器侧凭据注入 + usage 回填成本）+ 遥测事件（telemetry_events + SSE）
 - ✅ **M7 DSH 监控终端**：Ink TUI 只读监控（REST/SSE 数据源，对齐 Web 看板）
 - ✅ **M8 命令终端**：每终端独立密钥 + HMAC 签发（60s 时间窗防重放）+ 白名单执行 + 注册 ACK 重试 + 审计双写对账 + 密钥轮换（10 分钟双验）
-- ✅ **M2.6 任务生命周期止血**：子任务租约（mode 感知 lease_expires_at + 5s 确定性回收 + E01 退避回池）、per-kind 条件核销（attempt+incubator 匹配，E17 迟到结果不复活）、强制取消（全部在途/待执行 cancelled + 取消注册表墓碑持久化 + task_cancelled 单播 + 取消收尾全项）、SSE 命名事件（telemetry.update + Last-Event-ID 回放）
+- 🟡 **M2.6 任务生命周期止血（主体落地，两处接线待补）**：已落地 mode 感知租约抢占 `lease_expires_at`、`RecoverExpiredLeases` 回收算法与单测、复核子任务条件核销接入、强制取消链路（在途清单 + 取消注册表墓碑持久化 + task_cancelled 单播 + 审批作废/取消归档）、SSE 命名事件 `telemetry.update`。**待补**：租约回收未接入运行中的 Watchdog（当前仅测试调用）；普通执行结果未调用 `FinishSubtaskAttempt`（幂等函数存在但生产路径未接线）；SSE 缺 `id`/`Last-Event-ID` 回放与 15s 心跳；任务级确定性 Watchdog 未实现
 - ⚙️ **后续迭代**：AI 语义拆解、TCP 兜底通道、模板市场、多租户（见主设计 §3.3 范围三态）
 
 **已知边界**（协议/数据面已就绪、特性未接线的部分；完整清单见
@@ -563,10 +563,18 @@ macs/
 - **插件化适配器加载已实现（模块 #29）**：Manifest 校验 + JSON-RPC 子进程隔离 + 崩溃监控 + 能力门控 + 热重载（plugins.enabled 默认关）
 - **丢包模拟已验证**：5%/20%/50% 三档下 E16 广播仲裁收敛（唯一承接者不变）
 - **fetch_request 分片传输已就绪**：FragmentBuffer 重组器 + MsgFetchResponse 常量（当前产物 <256KB 未启用分片）
-- **M2.6 任务生命周期已实现**：子任务租约（lease_expires_at + 5s 确定性回收）、执行结果条件核销（attempt+incubator 匹配，E17 迟到结果不复活）、强制取消（全部在途/待执行 cancelled + 取消注册表 + task_cancelled 单播）、SSE 命名事件（telemetry.update）
+- **M2.6 任务生命周期为部分实现**（2026-11-16 核对基线 `48a6662`）：
+  - 租约：`ClaimSubtaskLease` 原子抢占、`LeaseTimeoutFor` mode 感知、`RecoverExpiredLeases` 算法与 `lease_test.go` 已就绪；**但 `watchdog()` 未调用回收函数**，生产环境租约到期不会自动回收
+  - 结果幂等：`FinishSubtaskAttempt` 已实现并单测；**普通 `HandleResult` 分支未调用它，也不写 `completed` 终态**（`FinishSubtask` 仅失败路径调用），普通成功子任务会停在 `dispatched`；复核分支已调用 `FinishReviewAttempt`；成本/遥测副作用先于核销
+  - 取消：`POST /api/v1/tasks/{id}/cancel`、`ForceCancelSubtasks`、UDP 单播、孵化器 `CancelRegistry` 与 `cancel_tombstones` 持久化已落地；取消状态查询与更新非同一事务，`cancelState` 为进程级单任务暂存，并发取消不同任务时统计可能串扰
+  - SSE：塔侧已发 `event: telemetry.update`，Web/DSH 均已用 `addEventListener`；**缺 `id` 与 `Last-Event-ID` 回放**，心跳为 30s（设计为 15s），缓冲 100 条/订阅队列 64（设计为回放 200/慢客户端 256）
+  - 任务级确定性 Watchdog（`watchdog_event` / `needs_human` / 长时间无事件 / 连续同错）**未实现**，当前仍是原有 Worker TTL 清理
 - 下行指令 `task_cancelled` / `approval_result` / `template_updated` / `budget_changed` 已接线；`task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` 协议常量就绪待适用
-- ~~M2.6 未闭环项~~ → **已全部闭环（V3.5.10）**：lease_expires_at 租约 + FinishSubtaskAttempt/FinishReviewAttempt 条件核销 + 取消墓碑持久化 + SSE 命名事件
-- 已知测试缺陷：`macs-incubator` 的 `TestSessionDriverLifecycle` 使用 bash 脚本伪工具，在 Windows 下失败（测试可移植性问题，需按平台改写）
+- 已知测试缺陷（2026-11-16 本机 `go test ./...` 复现）：
+  - `macs-incubator` `TestSessionDriverLifecycle`：bash 脚本伪工具无扩展名，Windows `exec` 找不到可执行文件
+  - `macs-incubator` `TestEnabledGateStartsPlugin`：复制 `/bin/sleep` 作为插件可执行文件，Windows 不存在该路径
+  - 上述两项均为测试可移植性问题；`macs-tower` 全部测试通过，`macs-incubator` 构建与 vet 通过
+- 前端测试缺口：`macs-tower-web` 与 `macs-dsh-monitor` 可通过构建，但 `npm test` 因无测试文件退出 1
 - 6.4.11 预算：任务级/全局/孵化器级/**模板级**已强制（月度窗口 + budget_changed 下行 + 选机过滤）
 - 6.5 定时任务：超时检测/ACK 兜底/再平衡/Worker TTL/抽查重试/预算月度重置/资源快照清理已实现
 - `fetch_request` 大内容分片传输：协议就绪，当前产物均 <256KB 未启用

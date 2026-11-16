@@ -527,7 +527,7 @@ macs/
 - ✅ **M6 Unified agent platform protocol**: platform/driver/adapter registry + OpenAI/Anthropic protocol drivers (credential injection on incubator side + usage backfill) + telemetry events (SSE)
 - ✅ **M7 DSH monitoring terminal**: Ink TUI read-only monitor (REST/SSE data source aligned with the web HUD)
 - ✅ **M8 Command terminal**: per-terminal keys + HMAC-signed issuance (60s replay window) + allowlisted execution + register-ACK retry + audit reconciliation + secret rotation
-- ✅ **M2.6 Task-lifecycle stopgap**: subtask leases (mode-aware lease_expires_at + 5s deterministic recovery + E01 backoff requeue), per-kind conditional finalization (attempt+incubator match, E17 late-result no-resurrect), forced cancellation (all in-flight/pending cancelled + cancel registry durable tombstones + task_cancelled unicast + full closing semantics), named SSE events (telemetry.update + Last-Event-ID replay)
+- 🟡 **M2.6 Task-lifecycle stopgap (main path landed, two wiring gaps)**: landed mode-aware `lease_expires_at` claims, the `RecoverExpiredLeases` algorithm plus unit tests, conditional finalization wired for review subtasks, the forced-cancel path (in-flight collection + cancel-registry durable tombstones + `task_cancelled` unicast + approval expiry / cancel archive), and the `telemetry.update` named SSE event. **Still missing**: lease recovery is not called by the running watchdog (tests only); the normal result path never calls `FinishSubtaskAttempt` (the idempotent function exists but is unwired); SSE lacks `id` / `Last-Event-ID` replay and the 15s heartbeat; task-level deterministic watchdog is not implemented
 - ⚪ PostgreSQL production rollout + multi-tower federation
 
 **Known boundaries** (protocol/data plane ready, feature wiring pending; full list in
@@ -538,10 +538,18 @@ macs/
 - **Plugin adapter loading implemented (module #29)**: Manifest validation + JSON-RPC subprocess isolation + crash monitoring + capability gating + hot reload (plugins.enabled default off)
 - **Packet loss simulation verified**: E16 broadcast arbitration converges at 5%/20%/50% loss rates (single winner invariant)
 - **fetch_request chunked transfer ready**: FragmentBuffer reassembler + MsgFetchResponse constant (current artifacts <256KB, not yet wired)
-- **M2.6 task lifecycle implemented**: subtask leases (lease_expires_at + 5s deterministic recovery), conditional result finalization (attempt+incubator match, E17 late-result no-resurrect), forced cancellation (all in-flight/pending cancelled + cancel registry + task_cancelled unicast), named SSE events (telemetry.update)
+- **M2.6 task lifecycle is partially implemented** (audited 2026-11-16 at `48a6662`):
+  - Leases: `ClaimSubtaskLease`, mode-aware `LeaseTimeoutFor`, `RecoverExpiredLeases` and `lease_test.go` exist; **`watchdog()` never calls the recovery function**, so expired leases are not reclaimed in production
+  - Result idempotency: `FinishSubtaskAttempt` exists with unit tests, but **the normal `HandleResult` branch neither calls it nor writes the `completed` terminal state** (`FinishSubtask` is only used on the failure path), so successful non-review subtasks stay in `dispatched`; only the review branch calls `FinishReviewAttempt`. Cost/telemetry side effects also run before conditional finalization
+  - Cancellation: `POST /api/v1/tasks/{id}/cancel`, `ForceCancelSubtasks`, UDP unicast, incubator `CancelRegistry` and `cancel_tombstones` persistence all landed; however the cancel query/update pair is not one transaction, and `cancelState` is a process-wide single-task buffer, so concurrent cancels of different tasks can mix up counters
+  - SSE: the tower emits `event: telemetry.update` and Web/DSH both use `addEventListener`; **`id` and `Last-Event-ID` replay are missing**, heartbeat is 30s (design says 15s), and buffers are 100 recent / 64 per-subscriber (design says 200 replay / 256 slow-client cap)
+  - Task-level deterministic watchdog (`watchdog_event` / `needs_human` / no-event-for-too-long / repeated identical error) **is not implemented**; only the legacy worker TTL sweep exists
 - Downlink wired: `task_cancelled` (rollback running workers) / `approval_result` / `template_updated` / `budget_changed`; `task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` constants ready, wire on demand
-- M2.6 gaps: no `lease_expires_at` subtask lease (only the global TTL watchdog; an incubator crash leaves subtasks stuck in `dispatched/running`); `FinishSubtask` has no `attempt_count + incubator_id` guard (a late old-attempt result can overwrite); cancelling in-flight subtasks is still fail-open (no tombstone); SSE frames use the default `message` event, so the DSH plugin's `telemetry.update` listener receives nothing
-- Known test defect: `macs-incubator` `TestSessionDriverLifecycle` uses a bash-script fake agent and fails on Windows (test portability; needs a per-platform rewrite)
+- Known test defects (reproduced 2026-11-16 with `go test ./...`):
+  - `macs-incubator` `TestSessionDriverLifecycle`: the bash fake agent has no file extension, so Windows `exec` cannot find an executable
+  - `macs-incubator` `TestEnabledGateStartsPlugin`: copies `/bin/sleep` as the plugin executable, a path that does not exist on Windows
+  - Both are test-portability issues; all `macs-tower` tests pass and `macs-incubator` builds and vets cleanly
+- Frontend test gap: `macs-tower-web` and `macs-dsh-monitor` build successfully, but `npm test` exits 1 because no test files exist
 - 6.4.11 budgets enforced: task / global / incubator / **template** level (monthly window + budget_changed downlink + dispatch filter)
 - 6.5 timers live: stale detection, ACK janitor, rebalance, worker TTL, spot-check retry, monthly budget reset, resource-snapshot cleanup
 - `fetch_request` large-content chunked transfer: protocol ready, unused while artifacts stay <256KB
