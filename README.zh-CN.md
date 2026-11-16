@@ -5,9 +5,8 @@
 
 <p align="center">
   <a href="#quickstart"><strong>Quickstart</strong></a> &middot;
-  <a href="design/MACS技术设计文档.md"><strong>技术设计</strong></a> &middot;
-  <a href="design/UI交互与运维监控设计.md"><strong>UI 设计</strong></a> &middot;
-  <a href="design/数据库存储设计.md"><strong>数据库设计</strong></a> &middot;
+  <a href="#roadmap"><strong>开发进度</strong></a> &middot;
+  <a href="#contributing"><strong>协作规则</strong></a> &middot;
   <a href="https://github.com/Jarcem/MACS"><strong>GitHub</strong></a>
 </p>
 
@@ -533,8 +532,6 @@ macs/
 ├─ macs-tower-web/      管理后台（React + Vite）：深色 HUD 单页（审批/质量/成本/归档/终端/平台面板）
 ├─ macs-dsh-monitor/    DSH 监控终端（Ink TUI，只读）
 ├─ scripts/             开发环境启停脚本 + 进程安全清理库（含 37 项回归测试）
-├─ design/              技术设计 / UI 设计 / 数据库设计 / 协议变更说明 / 设计实现对照表
-├─ architecture/        云 Agent 生态架构图
 ├─ bin/                 构建产物（不入库）
 └─ docker-compose.yml   本地 PostgreSQL（可选）
 ```
@@ -555,8 +552,7 @@ macs/
 - ✅ **M2.6 任务生命周期止血**：mode 感知租约 + 5s leaseWatchdog 回收（已接线）、普通/复核 per-kind 条件核销（普通分支已接 FinishSubtaskAttempt，副作用严格后置）、强制取消（单事务 + 取消注册表墓碑持久化 + task_cancelled 单播 + 收尾全项）、SSE 帧规范（id 行 / Last-Event-ID 回放 / 15s 心跳 / 慢客户端断开）、任务级确定性 Watchdog（停滞/连续同错 → 告警）
 - ⚙️ **后续迭代**：AI 语义拆解、TCP 兜底通道、模板市场、多租户（见主设计 §3.3 范围三态）
 
-**已知边界**（协议/数据面已就绪、特性未接线的部分；完整清单见
-[design/设计实现对照表.md](design/设计实现对照表.md)）：
+**已知边界**（当前开发进度与真实验证状态）：
 
 - 6.4.10 护栏：唤醒环冻结 / done 验收门 / 断路器 / 有界上下文 / Worker TTL 看门狗已实现；空闲下岗由 TTL 看门狗等价覆盖
 - **会话载体 Worker 已实现**：zcode / trae / DeepSeek Harness / claude code / codex 作为持久载体，子 Worker 在同一 session 内连续孵化（任务级 carrier 亲和）；进程树终止（Unix 进程组 / Windows taskkill /T /F）落地
@@ -586,7 +582,7 @@ macs/
 
 ## Contributing
 
-欢迎提交 Issue 与 PR。改动协议字段、数据库 Schema 前请先同步 `design/` 下的设计文档；新增模块请对齐《技术设计文档》第七章模块交付清单。
+欢迎提交 Issue 与 PR。本仓库仅保留工程代码、测试、运行配置及开发/更新进度；技术设计、架构图、需求说明和设计实现对照资料统一保存在 DailyWorks，不得提交或推送。无法访问 DailyWorks 的开发 Agent 应依据独立需求说明开发，并在提交和推送前移除仓库内的需求说明及其他设计资料副本。详细约束见 [AGENTS.md](AGENTS.md)。
 
 <br/>
 

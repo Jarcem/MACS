@@ -37,3 +37,8 @@ tsconfig.tsbuildinfo
 .DS_Store
 Thumbs.db
 macs-cmdterm/cmdterm
+
+# ── 外部设计资料与临时需求文档（仅保存在 DailyWorks）──
+/design/
+/architecture/
+/requirements/

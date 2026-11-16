@@ -5,9 +5,8 @@
 
 <p align="center">
   <a href="#quickstart"><strong>Quickstart</strong></a> &middot;
-  <a href="design/MACS技术设计文档.md"><strong>Technical Design</strong></a> &middot;
-  <a href="design/UI交互与运维监控设计.md"><strong>UI Design</strong></a> &middot;
-  <a href="design/数据库存储设计.md"><strong>Storage Design</strong></a> &middot;
+  <a href="#roadmap"><strong>Development Progress</strong></a> &middot;
+  <a href="#contributing"><strong>Contributing Rules</strong></a> &middot;
   <a href="https://github.com/Jarcem/MACS"><strong>GitHub</strong></a>
 </p>
 
@@ -508,8 +507,6 @@ macs/
 ├─ macs-tower-web/      Admin console (React + Vite): dark single-page HUD (approvals / quality / cost / archive / terminals / platforms)
 ├─ macs-dsh-monitor/    DSH monitoring terminal (Ink TUI, read-only)
 ├─ scripts/             Dev start/stop scripts + safe process-cleanup library (37 regression assertions)
-├─ design/              Technical / UI / storage design documents + design-vs-implementation mapping
-├─ architecture/        Cloud agent ecosystem architecture diagram
 ├─ bin/                 Build output (not committed)
 └─ docker-compose.yml   Local PostgreSQL (optional)
 ```
@@ -530,8 +527,7 @@ macs/
 - ✅ **M2.6 Task-lifecycle stopgap**: mode-aware leases + 5s leaseWatchdog recovery (wired into Start), per-kind conditional finalization for both normal (FinishSubtaskAttempt wired, side effects strictly post-finalization) and review paths, forced cancellation (single transaction + durable cancel tombstones + unicast + full closing), SSE frame spec (id line / Last-Event-ID replay / 15s heartbeat / slow-client disconnect), task-level deterministic watchdog (stalled / repeated-error alerts)
 - ⚪ PostgreSQL production rollout + multi-tower federation
 
-**Known boundaries** (protocol/data plane ready, feature wiring pending; full list in
-[design/设计实现对照表.md](design/设计实现对照表.md)):
+**Known boundaries** (current development progress and verified status):
 
 - 6.4.10 guardrails live: wake-loop freeze, done acceptance gate, circuit breaker, bounded context (LLM max-token cap), worker TTL watchdog
 - **Session-carrier workers implemented**: zcode / trae / DeepSeek Harness / claude code / codex as persistent carriers — sub-workers incubate inside the same session (task-level carrier affinity); process-tree termination landed (Unix process group / Windows taskkill /T /F)
@@ -559,7 +555,7 @@ macs/
 
 ## Contributing
 
-Issues and PRs are welcome. Before changing protocol fields or the database schema, update the documents under `design/` first. New modules should follow the delivery list in Chapter 7 of the technical design.
+Issues and PRs are welcome. This repository contains only engineering code, tests, runtime configuration, and development/update progress. Technical designs, architecture diagrams, requirement briefs, and design-to-implementation mappings are maintained in DailyWorks and must not be committed or pushed. Agents without DailyWorks access must work from a standalone requirement brief and remove any requirement or design copies before committing and pushing. See [AGENTS.md](AGENTS.md) for the repository rules.
 
 <br/>
 

@@ -41,7 +41,7 @@ var seedDrivers = []store.ProtocolDriver{
 	{
 		DriverName: "cli-native-protocol", Version: "1.0", ProtocolFamily: "cli-native",
 		Description: "CLI 型适配器（argv 直启），不走 API 能力协商（6.4.9）",
-		SpecURL:     "design/MACS技术设计文档.md#649",
+		SpecURL:     "https://github.com/Jarcem/MACS#architecture",
 	},
 	{
 		DriverName: "openai-compat-protocol", Version: "1.0", ProtocolFamily: "openai-compatible",
