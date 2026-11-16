@@ -12,6 +12,7 @@ package plugins
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,6 +82,8 @@ type Plugin struct {
 	Dir       string
 	State     State
 	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
 	startedAt time.Time
 	restarts  int
 }
@@ -193,13 +196,12 @@ func (m *Manager) start(p *Plugin) error {
 	// JSON-RPC stdio 通信：后续增强（当前先保证子进程隔离启动/停止/监控）
 	stdin, _ := cmd.StdinPipe()
 	stdout, _ := cmd.StdoutPipe()
-	_ = stdin
-	_ = stdout
 	if err := cmd.Start(); err != nil {
 		p.State = StateCrashed
 		return fmt.Errorf("start: %w", err)
 	}
 	p.cmd = cmd
+	p.stdin, p.stdout = stdin, stdout
 	p.State = StateRunning
 	p.startedAt = time.Now()
 	m.lastScan[exePath] = time.Now()
@@ -223,10 +225,7 @@ func (m *Manager) restart(name string) {
 	if !ok {
 		return
 	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-		p.cmd.Wait()
-	}
+	stopPlugin(p)
 	p.State = StateStopped
 	m.start(p)
 }
@@ -242,12 +241,23 @@ func (m *Manager) Stop(name string) error {
 	if p.State != StateRunning {
 		return nil
 	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-		p.cmd.Wait()
-	}
+	stopPlugin(p)
 	p.State = StateStopped
 	return nil
+}
+
+// stopPlugin 统一停止：先关 stdio 管道（否则 Wait 阻塞等拷贝）再 Kill；
+// 进程回收由崩溃监控 goroutine 的 cmd.Wait() 独占承担（避免双 Wait 竞争）
+func stopPlugin(p *Plugin) {
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+	}
+	if p.stdout != nil {
+		_ = p.stdout.Close()
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
 }
 
 // HasCapability 能力门控：插件声明了指定能力才允许调用（§6.4.12 越权拒绝）
@@ -283,9 +293,8 @@ func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, p := range m.plugins {
-		if p.State == StateRunning && p.cmd != nil && p.cmd.Process != nil {
-			_ = p.cmd.Process.Kill()
-			p.cmd.Wait()
+		if p.State == StateRunning {
+			stopPlugin(p)
 		}
 		p.State = StateStopped
 	}

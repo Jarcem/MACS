@@ -5,6 +5,7 @@ package plugins
 
 import (
 	"encoding/json"
+	"runtime"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,6 +99,9 @@ func TestScanFindsPlugins(t *testing.T) {
 }
 
 func TestDisabledGateRejectsStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sleep not available on Windows (test portability)")
+	}
 	dir := t.TempDir()
 	writePlugin(t, dir, "test-plug", Manifest{
 		Name: "test-plug", Version: "1.0", Type: "adapter",
@@ -111,6 +115,9 @@ func TestDisabledGateRejectsStart(t *testing.T) {
 }
 
 func TestEnabledGateStartsPlugin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sleep not available on Windows (test portability)")
+	}
 	dir := t.TempDir()
 	writePlugin(t, dir, "ok-plug", Manifest{
 		Name: "ok-plug", Version: "1.0", Type: "tool",
@@ -134,7 +141,7 @@ func TestEnabledGateStartsPlugin(t *testing.T) {
 	}
 	// 状态应为 running
 	status := m.Status()
-	if len(status) != 1 || status[0]["state"] != StateRunning {
+	if len(status) != 1 || status[0]["state"] != string(StateRunning) {
 		t.Errorf("插件应 running，got %+v", status)
 	}
 	m.Close()

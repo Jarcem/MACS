@@ -5,6 +5,7 @@ package worker
 
 import (
 	"encoding/json"
+	"runtime"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,9 @@ import (
 // 会话载体（§6.4.9 CLI Native 扩展）：伪工具首启签发 session id，
 // 续会话参数携带 {{session}} —— 验证同一 session 内连续孵化子 Worker 的契约
 func TestSessionDriverLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash fake agent not available on Windows (test portability; tracked in README known defects)")
+	}
 	t.Setenv("MACS_ALLOW_SESSION_AGENT", "1")
 	dir := t.TempDir()
 	// 伪工具：无 resume 参数（首启）→ 签发 sess-001；有 resume → 续签 sess-001 并回显

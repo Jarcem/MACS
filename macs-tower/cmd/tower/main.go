@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"encoding/json"
 	"errors"
 	"log"
@@ -431,11 +432,12 @@ func main() {
 	})
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", guard(authz.ScopeOps, func(w http.ResponseWriter, r *http.Request) {
 		// M2.6 §6.4.3.3 API 契约：200 {id, status:cancelled, changed, cancelled_subtasks, notified_incubators}
-		if _, err := orch.CancelTask(r.PathValue("id")); err != nil {
+		result, err := orch.CancelTask(r.PathValue("id"))
+		if err != nil {
 			apiErr(w, 500, 66500, err.Error())
 			return
 		}
-		wj(w, orch.PopCancelResult(r.PathValue("id")))
+		wj(w, result)
 	}))
 
 	// ── M3 质量面：审批 / 抽查 / 追溯 / 归档 ──
@@ -735,20 +737,33 @@ func main() {
 		wj(w, map[string]any{"data": list})
 	})
 	// SSE 实时事件（V3.0 §6.4.13）：状态/遥测推送 + 30s 心跳帧
+	// §6.4.13.4.1 SSE 帧规范：id/event/data 三行帧 + 15s 心跳 + Last-Event-ID 回放 ≤200
 	mux.HandleFunc("GET /api/v1/telemetry/stream", func(w http.ResponseWriter, r *http.Request) {
 		fl, ok := w.(http.Flusher)
 		if !ok {
 			apiErr(w, 500, 66500, "stream unsupported")
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no") // 反代不缓冲
 		fl.Flush()
+
+		// 断线回放：Last-Event-ID 之后最近 ≤200 条 telemetry_events（时间正序）
+		if lastID := r.Header.Get("Last-Event-ID"); lastID != "" {
+			if evs, err := st.ListTelemetryEventsAfterID(lastID, 200); err == nil && len(evs) > 0 {
+				for _, e := range evs {
+					fmt.Fprintf(w, "id: %d\nevent: telemetry.update\ndata: %s\n\n", e.ID, e.Payload)
+				}
+				fl.Flush()
+			}
+		}
 
 		ch, cancel := hub.Subscribe()
 		defer cancel()
-		tk := time.NewTicker(30 * time.Second)
+		seq := hub.Seq() // 实时流 id 基准（断线回放以 telemetry_events 自增 id 为准）
+		tk := time.NewTicker(15 * time.Second) // §6.4.13.4.1：15s 心跳
 		defer tk.Stop()
 		for {
 			select {
@@ -757,10 +772,14 @@ func main() {
 			case <-tk.C:
 				_, _ = w.Write([]byte(": heartbeat\n\n"))
 				fl.Flush()
-			case b := <-ch:
+			case b, ok := <-ch:
+				if !ok {
+					return // 慢客户端被 Hub 主动断开（§6.4.13.4.1）；客户端重连回放
+				}
+				seq++
 				// M2.6：SSE 命名事件帧（UI §14.1 / 主设计 6.4.13.3）——
 				// web/DSH 统一 addEventListener('telemetry.update')
-				_, _ = w.Write([]byte("event: telemetry.update\ndata: "))
+				fmt.Fprintf(w, "id: %d\nevent: telemetry.update\ndata: ", seq)
 				_, _ = w.Write(b)
 				_, _ = w.Write([]byte("\n\n"))
 				fl.Flush()

@@ -114,9 +114,36 @@ func New(st *store.Store, disp *dispatcher.Dispatcher, hub *events.Hub,
 
 func (o *Orchestrator) Start() {
 	go o.loop()
-	go o.watchdog()     // 6.5 Worker 超时清理 + 重试退避回池
-	go o.rebalancer()   // 6.4.7 rebalanceTick
-	go o.monthlyReset() // 6.5 预算月度重置
+	go o.watchdog()       // 6.5 Worker TTL 兜底清理 + 重试退避回池
+	go o.leaseWatchdog()  // M2.6 §6.4.3.1 确定性租约回收（5s；TTL 仅为兜底）
+	go o.rebalancer()     // 6.4.7 rebalanceTick
+	go o.monthlyReset()   // 6.5 预算月度重置
+	go o.taskWatchdog()   // 任务级确定性 Watchdog（停滞/连续同错 → 告警）
+}
+
+// leaseWatchdog M2.6 §6.4.3.1 确定性租约回收（每 5s；now 由调用方注入算法）：
+// 过期租约按 attempt 余量回收（retry=failed+next_retry_at E01 退避 / 耗尽 failed），
+// 事件 subtask_lease_expired + RecomputeTask（RecoverExpiredLeases 内）+ 重新调度
+func (o *Orchestrator) leaseWatchdog() {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		recovered, err := o.st.RecoverExpiredLeases(time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			log.Printf(`{"level":"warn","module":"orchestrator","msg":"lease recover: %v"}`, err)
+			continue
+		}
+		for _, r := range recovered {
+			log.Printf("[orch] lease expired subtask=%s action=%s attempts=%d", r.SubtaskID, r.Action, r.Attempts)
+			o.hub.Publish("subtask_lease_expired", map[string]any{
+				"subtask_id": r.SubtaskID, "task_id": r.TaskID,
+				"action": r.Action, "attempt_count": r.Attempts,
+			})
+		}
+		if len(recovered) > 0 {
+			o.Notify()
+		}
+	}
 }
 
 // Notify 唤醒调度循环（去抖：已有待处理信号则跳过）
@@ -202,6 +229,43 @@ func (o *Orchestrator) checkIncubatorBudgets(incs []store.Incubator) {
 func (o *Orchestrator) budgetSuspendedFor(id string) bool {
 	v, ok := o.budgetSuspended.Load(id)
 	return ok && v.(bool)
+}
+
+// taskWatchdog 任务级确定性 Watchdog（60s tick）：
+//   stalled（长时间无事件）  任务 updated_at 超 30min 无变化且仍有在途子任务 → watchdog_event(stalled_task)
+//   repeated（连续同错）     最近 ≥3 个 failed 子任务错误完全一致 → watchdog_event(needs_human)
+// 两者均落 guardrail_events + SSE 广播，不自动干预（只告警，防误判）
+func (o *Orchestrator) taskWatchdog() {
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		staleBefore := time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339)
+		stalled, err := o.st.StalledTasks(staleBefore)
+		if err == nil {
+			for _, task := range stalled {
+				_ = o.st.InsertGuardrailEvent(store.GuardrailEvent{
+					ID: store.NewID(), TaskID: task.ID,
+					Type: "task_watchdog", Action: "stalled_task",
+					Detail: fmt.Sprintf(`{"kind":"stalled_task","last_update":"%s"}`, task.UpdatedAt),
+				})
+				o.hub.Publish("watchdog_event", map[string]any{
+					"task_id": task.ID, "kind": "stalled_task", "needs_human": false, "last_update": task.UpdatedAt,
+				})
+			}
+		}
+		if repeated, err := o.st.RepeatedErrorTasks(); err == nil {
+			for tid, errMsg := range repeated {
+				_ = o.st.InsertGuardrailEvent(store.GuardrailEvent{
+					ID: store.NewID(), TaskID: tid,
+					Type: "task_watchdog", Action: "needs_human",
+					Detail: fmt.Sprintf(`{"kind":"repeated_error","error":%q,"count":3}`, errMsg),
+				})
+				o.hub.Publish("watchdog_event", map[string]any{
+					"task_id": tid, "kind": "repeated_error", "needs_human": true, "error": errMsg,
+				})
+			}
+		}
+	}
 }
 
 // watchdog 每分钟：Worker TTL 超时清理（E02）+ 重试到期回池（E01）
@@ -369,22 +433,35 @@ func (o *Orchestrator) HandleResult(r Result) {
 		return
 	}
 
-	// ── 普通执行结果 ──
-	// 幂等（E07）：仅受理在途子任务的回传；终态/completed-after-review/补传重放直接吸收，
-	// 否则重放会重复落 cost_records / telemetry_events / 追溯链副作用
+	// ── 普通执行结果（M2.6 §6.4.3.2：FinishSubtaskAttempt 条件核销为唯一写终态口径）──
+	// 幂等（E07/E17）：仅受理在途回传；核销 RowsAffected=0（重复结果/旧 attempt/
+	// 错误孵化器/已取消）→ stale 吸收，不改写结果、不推进进度、零副作用
 	if sub.Status != "dispatched" && sub.Status != "running" {
-		return
+		return // 快速路径（内存态守卫；权威判定在下方条件 UPDATE）
 	}
-
 	status := "completed"
 	if r.Status != "completed" {
 		status = "failed"
 	}
+	// 兼容旧孵化器（回执不带 attempt_count=0）：回退用 DB 当前 attempt
+	attempt := r.AttemptCount
+	if attempt <= 0 {
+		attempt = sub.AttemptCount
+	}
+	changed, err := o.st.FinishSubtaskAttempt(sub.ID, status, r.Result, r.Error, r.WorkerID,
+		r.StartedAt, "", r.IncubatorID, attempt)
+	if err != nil {
+		log.Printf("[orch] finish subtask=%s: %v", sub.ID, err)
+		return
+	}
+	if !changed {
+		return // stale：重复/旧 attempt/错误孵化器/已取消 → 零副作用吸收
+	}
 
+	// ── 以下副作用仅在核销成功（changed=true）后发生 ──
 	// 追溯链指纹（6.4.4）：塔侧权威重算（链父 = 任务根，与 E06 对账口径一致）
-	fp := ""
 	if status == "completed" {
-		fp = o.tr.ComputeFor(sub.TaskID, r.Result)
+		fp := o.tr.ComputeFor(sub.TaskID, r.Result)
 		_ = o.st.SetSubtaskFingerprint(sub.ID, fp)
 		summary := fmt.Sprintf("%.80s", r.Result)
 		_ = o.tr.Record(sub.TaskID, sub.ID, fp, summary, "result", int64(len(r.Result)))
@@ -397,7 +474,6 @@ func (o *Orchestrator) HandleResult(r Result) {
 			_ = o.st.IncTemplateMonthlySpend(sub.TemplateID, r.Telemetry.CostCents)
 		}
 	}
-
 	// 成本与遥测（FR-21 / §6.4.13.4）
 	o.recordCost(sub, r)
 
@@ -410,7 +486,7 @@ func (o *Orchestrator) HandleResult(r Result) {
 	}
 
 	// ── 质量管线（M3）：自检门 → 复核孵化（review_pending 时不推进任务收口）──
-	sub.Status = status // 终态已落库，质量管线按最新状态判定
+	sub.Status = status // 终态已由条件核销落库，质量管线按最新状态判定
 	done := o.qual.OnExecutionResult(sub)
 	doneSub, _ := o.st.GetSubtask(sub.ID)
 	task, err := o.st.RecomputeTask(sub.TaskID)
@@ -604,25 +680,17 @@ type CancelResult struct {
 	NotifiedIncubators []string `json:"notified_incubators"`
 }
 
-// cancelState 取消收尾结果暂存（单任务取消端点取用）
-var cancelState struct {
-	mu                 sync.Mutex
-	taskID             string
-	cancelledSubtasks  int
-	notifiedIncubators []string
-}
-
-func (o *Orchestrator) CancelTask(taskID string) (bool, error) {
+func (o *Orchestrator) CancelTask(taskID string) (CancelResult, error) {
 	task, err := o.st.GetTask(taskID)
 	if err != nil {
-		return false, err
+		return CancelResult{}, err
 	}
 	if task.Status == "completed" || task.Status == "failed" || task.Status == "cancelled" {
-		return false, nil // 幂等：不重复产生副作用
+		return CancelResult{ID: taskID, Status: task.Status, Changed: false}, nil // 幂等
 	}
 	inflight, err := o.st.ForceCancelSubtasks(taskID)
 	if err != nil {
-		return false, err
+		return CancelResult{}, err
 	}
 	_ = o.st.SetTaskStatus(taskID, "cancelled")
 	// 取消收尾口径（M2.6 §6.4.3.3）：成本不回收（审计对账）/ 关联未决审批作废 / 取消归档 / 事件
@@ -654,28 +722,12 @@ func (o *Orchestrator) CancelTask(taskID string) (bool, error) {
 			sent[f.IncubatorID] = true
 		}
 	}
-	cancelState.mu.Lock()
-	cancelState.taskID = taskID
-	cancelState.cancelledSubtasks = len(inflight)
-	cancelState.notifiedIncubators = notified
-	cancelState.mu.Unlock()
-	return true, nil
+	return CancelResult{
+		ID: taskID, Status: "cancelled", Changed: true,
+		CancelledSubtasks: len(inflight), NotifiedIncubators: notified,
+	}, nil
 }
 
-// PopCancelResult 取消收尾结果（cancel 端点 200 响应体；M2.6 §6.4.3.3 API 契约）
-func (o *Orchestrator) PopCancelResult(taskID string) CancelResult {
-	cancelState.mu.Lock()
-	defer cancelState.mu.Unlock()
-	if cancelState.taskID != taskID {
-		return CancelResult{ID: taskID, Status: "cancelled", Changed: false}
-	}
-	r := CancelResult{ID: taskID, Status: "cancelled", Changed: true,
-		CancelledSubtasks: cancelState.cancelledSubtasks, NotifiedIncubators: cancelState.notifiedIncubators}
-	cancelState.taskID = ""
-	cancelState.cancelledSubtasks = 0
-	cancelState.notifiedIncubators = nil
-	return r
-}
 
 // ── 调度主循环（6.4.7 selectIncubator + 6.4.3 dispatchToIncubators）──
 

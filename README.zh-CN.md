@@ -552,7 +552,7 @@ macs/
 - ✅ **M6 统一 Agent 平台协议**：协议驱动注册与能力映射三表 + OpenAI/Anthropic 协议驱动（孵化器侧凭据注入 + usage 回填成本）+ 遥测事件（telemetry_events + SSE）
 - ✅ **M7 DSH 监控终端**：Ink TUI 只读监控（REST/SSE 数据源，对齐 Web 看板）
 - ✅ **M8 命令终端**：每终端独立密钥 + HMAC 签发（60s 时间窗防重放）+ 白名单执行 + 注册 ACK 重试 + 审计双写对账 + 密钥轮换（10 分钟双验）
-- 🟡 **M2.6 任务生命周期止血（主体落地，两处接线待补）**：已落地 mode 感知租约抢占 `lease_expires_at`、`RecoverExpiredLeases` 回收算法与单测、复核子任务条件核销接入、强制取消链路（在途清单 + 取消注册表墓碑持久化 + task_cancelled 单播 + 审批作废/取消归档）、SSE 命名事件 `telemetry.update`。**待补**：租约回收未接入运行中的 Watchdog（当前仅测试调用）；普通执行结果未调用 `FinishSubtaskAttempt`（幂等函数存在但生产路径未接线）；SSE 缺 `id`/`Last-Event-ID` 回放与 15s 心跳；任务级确定性 Watchdog 未实现
+- ✅ **M2.6 任务生命周期止血**：mode 感知租约 + 5s leaseWatchdog 回收（已接线）、普通/复核 per-kind 条件核销（普通分支已接 FinishSubtaskAttempt，副作用严格后置）、强制取消（单事务 + 取消注册表墓碑持久化 + task_cancelled 单播 + 收尾全项）、SSE 帧规范（id 行 / Last-Event-ID 回放 / 15s 心跳 / 慢客户端断开）、任务级确定性 Watchdog（停滞/连续同错 → 告警）
 - ⚙️ **后续迭代**：AI 语义拆解、TCP 兜底通道、模板市场、多租户（见主设计 §3.3 范围三态）
 
 **已知边界**（协议/数据面已就绪、特性未接线的部分；完整清单见

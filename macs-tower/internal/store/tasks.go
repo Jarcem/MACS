@@ -332,6 +332,62 @@ func (s *Store) SetTaskCarrier(taskID, incubatorID, sessionID string) error {
 	return err
 }
 
+// StalledTask 长时间无事件的任务（任务级 Watchdog：updated_at 超阈值且仍有在途子任务）
+func (s *Store) StalledTasks(staleBefore string) ([]Task, error) {
+	rows, err := s.db.Query(`SELECT `+taskCols+` FROM tasks
+		WHERE status IN ('running','in_spot_check') AND updated_at <> '' AND updated_at < ?
+		  AND EXISTS (SELECT 1 FROM subtasks WHERE task_id=tasks.id AND status IN ('dispatched','running'))`,
+		staleBefore)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RepeatedErrorTasks 连续同错任务（任务级 Watchdog：最近 ≥3 个 failed 子任务 error 完全一致 → needs_human）
+// 返回 task_id → 重复错误文本
+func (s *Store) RepeatedErrorTasks() (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT task_id, error FROM subtasks
+		WHERE status='failed' AND error<>'' AND next_retry_at=''
+		ORDER BY updated_at DESC LIMIT 500`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	// 按任务收集最近的 failed 错误序列（已按时间倒序）
+	seq := map[string][]string{}
+	for rows.Next() {
+		var tid, errMsg string
+		if err := rows.Scan(&tid, &errMsg); err != nil {
+			return nil, err
+		}
+		seq[tid] = append(seq[tid], errMsg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for tid, errs := range seq {
+		if len(errs) < 3 {
+			continue
+		}
+		// 连续 3 个相同错误（时间倒序的前 3 条一致）
+		if errs[0] == errs[1] && errs[1] == errs[2] {
+			out[tid] = errs[0]
+		}
+	}
+	return out, nil
+}
+
 // SetTaskStatus 直接推进任务状态（blocked/cancelled 等非聚合态）
 func (s *Store) SetTaskStatus(id, status string) error {
 	_, err := s.db.Exec(`UPDATE tasks SET status=?, updated_at=? WHERE id=?`, status, now(), id)
@@ -548,7 +604,14 @@ func (s *Store) ForceCancelSubtasks(taskID string) ([]struct {
 	IncubatorID string
 	Attempt     int
 }, error) {
-	rows, err := s.db.Query(`SELECT id, COALESCE(incubator_id,''), attempt_count FROM subtasks
+	// M2.6 §6.4.3.3：同一事务内先收集在途目标再置 cancelled（顺序不可调换，
+	// 否则置 cancelled 后查不到在途行，取消指令发不出去）
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT id, COALESCE(incubator_id,''), attempt_count FROM subtasks
 		WHERE task_id=? AND status IN ('dispatched','running')`, taskID)
 	if err != nil {
 		return nil, err
@@ -572,10 +635,12 @@ func (s *Store) ForceCancelSubtasks(taskID string) ([]struct {
 		}{id, inc, att})
 	}
 	rows.Close()
-	_, err = s.db.Exec(`UPDATE subtasks SET status='cancelled', quality_status='', lease_expires_at='', updated_at=?
+	if _, err := tx.Exec(`UPDATE subtasks SET status='cancelled', quality_status='', lease_expires_at='', updated_at=?
 		WHERE task_id=? AND status IN ('pending','ready','frozen','dispatched','running','review_pending','reviewing','in_spot_check')`,
-		now(), taskID)
-	if err != nil {
+		now(), taskID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return inflight, nil

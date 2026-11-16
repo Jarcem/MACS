@@ -130,7 +130,7 @@ func TestReviewResultReplayIdempotency(t *testing.T) {
 	if _, err := st.ClaimSubtaskLease(subA.ID, "inc-1", 0); err != nil {
 		t.Fatal(err)
 	}
-	orch.HandleResult(Result{SubtaskID: subA.ID, Status: "completed",
+	orch.HandleResult(Result{SubtaskID: subA.ID, Status: "completed", IncubatorID: "inc-1",
 		Result: `{"mode":"text_analysis","chars":3,"non_space":3,"unique":3,"top_chars":[]}`, WorkerID: "w"})
 
 	reviews, _ := st.ListSubtasksByReviewOf(subA.ID)

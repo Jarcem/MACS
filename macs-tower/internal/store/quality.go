@@ -6,6 +6,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -408,6 +409,36 @@ func (s *Store) InsertTelemetryEvent(e TelemetryEvent) error {
 	_, err := s.db.Exec(`INSERT INTO telemetry_events(task_id,subtask_id,worker_id,platform_adapter,agent_platform,event_type,payload,timestamp)
 		VALUES(?,?,?,?,?,?,?,?)`, e.TaskID, e.SubtaskID, e.WorkerID, e.PlatformAdapter, e.AgentPlatform, e.EventType, e.Payload, now())
 	return err
+}
+
+// ListTelemetryEventsAfterID SSE Last-Event-ID 断线回放（§6.4.13.4.1）：id 之后最近 limit 条（时间正序）
+func (s *Store) ListTelemetryEventsAfterID(lastID string, limit int) ([]TelemetryEvent, error) {
+	var last int64
+	if _, err := fmt.Sscan(lastID, &last); err != nil || last < 0 {
+		last = 0
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 200 // 设计上限：回放 ≤200 条
+	}
+	rows, err := s.db.Query(`SELECT id,COALESCE(task_id,''),COALESCE(subtask_id,''),worker_id,platform_adapter,agent_platform,event_type,payload,timestamp
+		FROM telemetry_events WHERE id > ? ORDER BY id DESC LIMIT ?`, last, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TelemetryEvent{}
+	for rows.Next() {
+		var e TelemetryEvent
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.SubtaskID, &e.WorkerID, &e.PlatformAdapter, &e.AgentPlatform, &e.EventType, &e.Payload, &e.Timestamp); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	// 反转为时间正序（回放语义）
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, rows.Err()
 }
 
 // ListTelemetryEvents 附录 B.1：按 task_id / subtask_id / event_type 过滤，最近 N 条
