@@ -247,7 +247,7 @@ Port assignments (per Appendix A · Q9 of the design docs):
 </td>
 <td>
 
-**Event bus** — in-process broadcast of `task_created / subtask_dispatched / subtask_finished / task_finished`, non-blocking drops, SSE with 30s heartbeats.
+**Event bus** — in-process broadcast of `task_created / subtask_dispatched / subtask_finished / task_finished`, non-blocking drops, SSE with 15s heartbeats.
 
 </td>
 </tr>
@@ -541,8 +541,8 @@ macs/
 - **M2.6 task lifecycle is partially implemented** (audited 2026-11-16 at `48a6662`):
   - Leases: `ClaimSubtaskLease`, mode-aware `LeaseTimeoutFor`, `RecoverExpiredLeases` and `lease_test.go` exist; **`watchdog()` never calls the recovery function**, so expired leases are not reclaimed in production
   - Result idempotency: `FinishSubtaskAttempt` exists with unit tests, but **the normal `HandleResult` branch neither calls it nor writes the `completed` terminal state** (`FinishSubtask` is only used on the failure path), so successful non-review subtasks stay in `dispatched`; only the review branch calls `FinishReviewAttempt`. Cost/telemetry side effects also run before conditional finalization
-  - Cancellation: `POST /api/v1/tasks/{id}/cancel`, `ForceCancelSubtasks`, UDP unicast, incubator `CancelRegistry` and `cancel_tombstones` persistence all landed; however the cancel query/update pair is not one transaction, and `cancelState` is a process-wide single-task buffer, so concurrent cancels of different tasks can mix up counters
-  - SSE: the tower emits `event: telemetry.update` and Web/DSH both use `addEventListener`; **`id` and `Last-Event-ID` replay are missing**, heartbeat is 30s (design says 15s), and buffers are 100 recent / 64 per-subscriber (design says 200 replay / 256 slow-client cap)
+  - Cancellation: `POST /api/v1/tasks/{id}/cancel`, `ForceCancelSubtasks`, UDP unicast, incubator `CancelRegistry` and `cancel_tombstones` persistence all landed; however the cancel query/update pair now runs in a single transaction; `CancelTask` returns `CancelResult` directly (eliminates cancelState cross-talk)
+  - SSE: the tower emits `event: telemetry.update` and Web/DSH both use `addEventListener`; `id:` line + Last-Event-ID replay ≤200 + 15s heartbeat + slow-client 256-frame disconnect
   - Task-level deterministic watchdog (`watchdog_event` / `needs_human` / no-event-for-too-long / repeated identical error) **is not implemented**; only the legacy worker TTL sweep exists
 - Downlink wired: `task_cancelled` (rollback running workers) / `approval_result` / `template_updated` / `budget_changed`; `task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` constants ready, wire on demand
 - Known test defects (reproduced 2026-11-16 with `go test ./...`):

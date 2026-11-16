@@ -245,7 +245,7 @@ MACS 把分布式编排里最容易写错的地方做对了。
 </td>
 <td>
 
-**事件总线** — 进程内广播 `task_created / subtask_dispatched / subtask_finished / task_finished`，非阻塞丢帧，SSE 30s 心跳。
+**事件总线** — 进程内广播 `task_created / subtask_dispatched / subtask_finished / task_finished`，非阻塞丢帧，SSE 15s 心跳。
 
 </td>
 </tr>
@@ -566,8 +566,8 @@ macs/
 - **M2.6 任务生命周期为部分实现**（2026-11-16 核对基线 `48a6662`）：
   - 租约：`ClaimSubtaskLease` 原子抢占、`LeaseTimeoutFor` mode 感知、`RecoverExpiredLeases` 算法与 `lease_test.go` 已就绪；**但 `watchdog()` 未调用回收函数**，生产环境租约到期不会自动回收
   - 结果幂等：`FinishSubtaskAttempt` 已实现并单测；**普通 `HandleResult` 分支未调用它，也不写 `completed` 终态**（`FinishSubtask` 仅失败路径调用），普通成功子任务会停在 `dispatched`；复核分支已调用 `FinishReviewAttempt`；成本/遥测副作用先于核销
-  - 取消：`POST /api/v1/tasks/{id}/cancel`、`ForceCancelSubtasks`、UDP 单播、孵化器 `CancelRegistry` 与 `cancel_tombstones` 持久化已落地；取消状态查询与更新非同一事务，`cancelState` 为进程级单任务暂存，并发取消不同任务时统计可能串扰
-  - SSE：塔侧已发 `event: telemetry.update`，Web/DSH 均已用 `addEventListener`；**缺 `id` 与 `Last-Event-ID` 回放**，心跳为 30s（设计为 15s），缓冲 100 条/订阅队列 64（设计为回放 200/慢客户端 256）
+  - 取消：`POST /api/v1/tasks/{id}/cancel`、`ForceCancelSubtasks`、UDP 单播、孵化器 `CancelRegistry` 与 `cancel_tombstones` 持久化已落地；取消查询与更新已在同一事务内；`CancelTask` 直接返回 `CancelResult`（消除 cancelState 串扰）
+  - SSE：塔侧已发 `event: telemetry.update`，Web/DSH 均已用 `addEventListener`；`id:` 行 + Last-Event-ID 回放 ≤200 + 15s 心跳 + 慢客户端 256 帧断开
   - 任务级确定性 Watchdog（`watchdog_event` / `needs_human` / 长时间无事件 / 连续同错）**未实现**，当前仍是原有 Worker TTL 清理
 - 下行指令 `task_cancelled` / `approval_result` / `template_updated` / `budget_changed` 已接线；`task_updated` / `config_updated` / `spot_check_request` / `merge_instruction` 协议常量就绪待适用
 - 已知测试缺陷（2026-11-16 本机 `go test ./...` 复现）：
