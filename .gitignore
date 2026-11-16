@@ -17,6 +17,7 @@
 *.log
 *.tmp
 tmp_*
+tmp/
 
 # ── Node / 前端 ──
 node_modules/

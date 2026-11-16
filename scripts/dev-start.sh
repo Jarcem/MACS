@@ -27,8 +27,10 @@ mkdir -p "$DEV_DIR"
 
 # 已登记且存活的进程不重复启动（幂等）
 already_running() { # $1=name
-  while read -r name pid; do
-    [ "$name" = "$1" ] && proc_verify_identity "$pid" "(^|[ /])$1([[:space:]]|$)" && return 0
+  # 局部变量名不得与调用方重名：bash 动态作用域 + read EOF 清空会覆写调用方的 local name
+  local rname rpid
+  while read -r rname rpid; do
+    [ "$rname" = "$1" ] && proc_verify_identity "$rpid" "(^|[ /])$1([[:space:]]|$)" && return 0
   done < <(ps_load_pidfile "$PIDFILE")
   return 1
 }
@@ -44,7 +46,13 @@ start_component() { # $1=name
     ps_audit "info" "reason=already_running" "name=${name}"
     return 0
   fi
-  GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go build -o "$DEV_DIR/$name" "./$name/cmd/$name" || {
+  local moddir
+  case "$name" in
+    tower)     moddir="macs-tower" ;;
+    incubator) moddir="macs-incubator" ;;
+    cmdterm)   moddir="macs-cmdterm" ;;
+  esac
+  ( cd "$moddir" && GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go build -o "$DEV_DIR/$name" "./cmd/$name" ) || {
     ps_audit "error" "reason=go_build_failed" "name=${name}"; return 1;
   }
   case "$name" in
