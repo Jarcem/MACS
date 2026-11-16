@@ -116,14 +116,35 @@ const fmtEvent = (e: StreamEvent) => {
   ].filter(Boolean).join(' · ') || '-';
 };
 
-function Panel({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
+// Panel：标题固定 + 内容区 .panel-scroll 内部滚动（V3.5.13 固定一屏布局）
+// chatMode=true 时自动跟随到底部（聊天框语义：用户上翻读史时不拽走）
+function Panel({ title, note, chat, children }: {
+  title: string; note?: string; chat?: boolean; children: React.ReactNode;
+}) {
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+  const stick = React.useRef(true);
+  const count = React.Children.count(children);
+
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (el && chat && stick.current) el.scrollTop = el.scrollHeight;
+  });
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
+
   return (
     <section className="hud-panel">
       <h2 className="panel-title">
         {title}
         {note && <span className="panel-note">{note}</span>}
       </h2>
-      {children}
+      <div className="panel-scroll" ref={scrollRef} onScroll={chat ? onScroll : undefined}>
+        {children}
+      </div>
     </section>
   );
 }
@@ -434,7 +455,7 @@ function TaskDetail({ id, onClose }: { id: string; onClose: () => void }) {
 }
 
 // ── 运维平面 · 配置开关面板（UI §7.3 /ops/config：当前值/默认值/语义/边界）──
-function ConfigPanel() {
+function ConfigPanel({ compact }: { compact?: boolean }) {
   const { data, err } = usePoll(() => api.configSwitches(), 15000);
   const rows = data?.data ?? [];
   return (
@@ -550,7 +571,7 @@ function QualityPanel({ refreshKey }: { refreshKey: number }) {
 }
 
 // M3 归档文档库（/archive 交互平面）
-function ArchivePanel({ refreshKey }: { refreshKey: number }) {
+function ArchivePanel({ refreshKey, compact }: { refreshKey: number; compact?: boolean }) {
   const { data, err, refresh } = usePoll(() => api.documents(), 15000);
   useEffect(() => { if (refreshKey > 0) refresh(); }, [refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const docs: ArchiveDoc[] = data ?? [];
@@ -588,7 +609,7 @@ function ArchivePanel({ refreshKey }: { refreshKey: number }) {
 }
 
 // M5 成本看板（/monitor/cost）
-function CostPanel({ refreshKey }: { refreshKey: number }) {
+function CostPanel({ refreshKey, compact }: { refreshKey: number; compact?: boolean }) {
   const { data, err } = usePoll(() => api.costsSummary(), 15000);
   useEffect(() => { /* SSE 驱动 */ }, [refreshKey]);
   const sums: CostSummary[] = data?.data ?? [];
@@ -617,7 +638,7 @@ function CostPanel({ refreshKey }: { refreshKey: number }) {
 }
 
 // M8 命令终端（/ops 平面，danger 操作）
-function CommandPanel({ refreshKey }: { refreshKey: number }) {
+function CommandPanel({ refreshKey, compact }: { refreshKey: number; compact?: boolean }) {
   const { data, err, refresh } = usePoll(() => api.commandTerminals(), 10000);
   useEffect(() => { if (refreshKey > 0) refresh(); }, [refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const terminals: CommandTerminal[] = data ?? [];
@@ -697,7 +718,7 @@ function CommandPanel({ refreshKey }: { refreshKey: number }) {
 }
 
 // M6 平台与协议驱动（/ops 平台注册表）
-function PlatformsPanel({ refreshKey }: { refreshKey: number }) {
+function PlatformsPanel({ refreshKey, compact }: { refreshKey: number; compact?: boolean }) {
   const { data, err } = usePoll(() => api.agentPlatforms(), 20000);
   useEffect(() => { /* SSE 驱动 */ }, [refreshKey]);
   const platforms: AgentPlatform[] = data ?? [];
@@ -730,6 +751,12 @@ function PlatformsPanel({ refreshKey }: { refreshKey: number }) {
 const keyOf = (e: StreamEvent) => `${e.ts}|${e.event}|${e.data?.subtask_id ?? e.data?.id ?? ''}`;
 
 // 单页布局：任务编排 + 审批 + 质量 + 归档 + 成本 + 命令终端 + 平台 + 集群 + 调度记录
+// ── 三列仪表盘布局（V3.5.13 固定一屏改造）────────────────────────────
+//   左列：任务编排（表单+卡片，内部滚动） / 调度记录
+//   中列：实时事件（聊天式跟随） / 集群状态+拓扑
+//   右列：审批中心 / 抽查核验 / 成本中心
+//   底部标签区：归档 | 命令终端 | 平台 | 配置
+
 export function App() {
   const inc = usePoll(api.incubators, 10000);
   const dsp = usePoll(api.dispatchLog, 10000);
@@ -739,11 +766,12 @@ export function App() {
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [lastAt, setLastAt] = useState('-');
   const [refreshKey, setRefreshKey] = useState(0);
+  const [bottomTab, setBottomTab] = useState<'archive' | 'command' | 'platforms' | 'config'>('command');
   const bump = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const live = useEventStream((ev) => {
     setLastAt(fmtTime(ev.ts));
-    setEvents((prev) => [ev, ...prev.filter((x) => keyOf(x) !== keyOf(ev))].slice(0, 12));
+    setEvents((prev) => [...prev.filter((x) => keyOf(x) !== keyOf(ev)), ev].slice(-50));
     if (TASK_EVENTS.includes(ev.event)) {
       tsk.refresh();
       dsp.refresh();
@@ -765,9 +793,8 @@ export function App() {
         <div>
           <h1 className="page-title">MACS 控制塔</h1>
           <p className="page-sub">
-            运维 / 监控 / 交互 三平面 · M3 质量 · M5 成本 · M6 协议 · M8 命令终端 ·
             <span className={live ? 'hud-running' : 'hud-checking'}>
-              {live ? ' SSE 实时' : ' SSE 重连中'}
+              {live ? '● SSE 实时' : '○ SSE 重连中'}
             </span>
             <span className="mono-dim"> · 最近事件 {lastAt}</span>
           </p>
@@ -794,137 +821,192 @@ export function App() {
         </div>
       </header>
 
-      {(inc.err || dsp.err || tsk.err) && (
-        <p className="hud-failed" style={{ fontSize: 12 }}>
-          连接异常：{inc.err ?? dsp.err ?? tsk.err}
-        </p>
-      )}
-
-      <Panel title="任务编排" note="内置拆解 / CLI / HTTP / OpenAI 协议驱动 → 复核 → 抽查 → 归档">
-        <div className="task-form task-sub">
-          <select value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="状态筛选" style={{ maxWidth: 150 }}>
-            <option value="">全部状态</option>
-            <option value="pending">pending</option>
-            <option value="running">running</option>
-            <option value="in_spot_check">in_spot_check</option>
-            <option value="completed">completed</option>
-            <option value="partial_failure">partial_failure</option>
-            <option value="blocked">blocked</option>
-            <option value="failed">failed</option>
-            <option value="cancelled">cancelled</option>
-          </select>
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索目标关键词（历史记录 V3.3）" aria-label="搜索" />
+      {/* 三列仪表盘 */}
+      <div className="dash">
+        {/* 左列：任务编排 + 调度记录 */}
+        <div className="dash-col">
+          <Panel title="任务编排" note="内置拆解 / CLI / HTTP / OpenAI 驱动 / 会话载体">
+            <div className="task-form task-sub">
+              <select value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="状态筛选" style={{ maxWidth: 130 }}>
+                <option value="">全部状态</option>
+                <option value="pending">pending</option>
+                <option value="running">running</option>
+                <option value="in_spot_check">in_spot_check</option>
+                <option value="completed">completed</option>
+                <option value="partial_failure">partial_failure</option>
+                <option value="blocked">blocked</option>
+                <option value="failed">failed</option>
+                <option value="cancelled">cancelled</option>
+              </select>
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索关键词" aria-label="搜索" />
+            </div>
+            <TaskBoard tasks={tasks} err={tsk.err} onChanged={bump} />
+          </Panel>
+          <Panel title="调度记录" note={`近 ${dispatch.length} 条`}>
+            <DispatchTable rows={dispatch} err={dsp.err} />
+          </Panel>
         </div>
-        <TaskBoard tasks={tasks} err={tsk.err} onChanged={bump} />
-      </Panel>
 
-      <ApprovalsPanel refreshKey={refreshKey} onChanged={bump} />
-      <QualityPanel refreshKey={refreshKey} />
-      <CostPanel refreshKey={refreshKey} />
-      <ArchivePanel refreshKey={refreshKey} />
+        {/* 中列：实时事件（聊天式跟随）+ 集群状态/拓扑 */}
+        <div className="dash-col">
+          {/* 聊天式事件流：专用 section 直接持有滚动容器（不用通用 Panel 避免双嵌套滚动） */}
+          <section className="hud-panel" style={{ flex: '1.3 1 0' }}>
+            <h2 className="panel-title">
+              实时事件
+              <span className="panel-note">{live ? 'SSE 已连接 · 聊天式跟随' : 'SSE 重连中'}</span>
+            </h2>
+            <EventFeed events={events} />
+          </section>
+          <Panel title="集群状态" note={`${incubators.length} 台`}>
+            <ClusterTable incubators={incubators} err={inc.err} />
+          </Panel>
+        </div>
 
-      <Panel title="实时事件" note={live ? 'SSE 已连接 · 事件驱动刷新' : 'SSE 重连中 · 轮询兜底'}>
-        {events.length === 0 ? (
-          <p className="hint">等待事件。提交任务后会实时出现「任务创建 / 子任务下发 / 质量事件 / 任务完成」。</p>
-        ) : (
-          <table className="hud-table">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>事件</th>
-                <th>详情</th>
-              </tr>
-            </thead>
-            <tbody>
-              {events.map((e, i) => (
-                <tr key={`${e.ts}-${i}`}>
-                  <td className="mono-dim">{fmtTime(e.ts)}</td>
-                  <td className="hud-running">{e.event}</td>
-                  <td className="mono-dim">{fmtEvent(e)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Panel>
+        {/* 右列：集群拓扑 + 审批/抽查/成本 */}
+        <div className="dash-col">
+          <Panel title="集群拓扑" note="tower :8470 / :8471">
+            <TopologyView incubators={incubators} err={inc.err} />
+          </Panel>
+          <Panel title="质量与预算">
+            <QualityBudgetView refreshKey={refreshKey} tasks={tasks} />
+          </Panel>
+        </div>
+      </div>
 
-      <Panel title="集群状态" note={`${incubators.length} 台`}>
-        {incubators.length === 0 ? <Empty err={inc.err} /> : (
-          <table className="hud-table">
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>状态</th>
-                <th>槽位</th>
-                <th>负载</th>
-                <th>地址</th>
-                <th>最后心跳</th>
-              </tr>
-            </thead>
-            <tbody>
-              {incubators.map((i) => (
-                <tr key={i.ID}>
-                  <td>{i.Name}</td>
-                  <td className={statusClass(i.Status)}>{i.Status}</td>
-                  <td>{i.Capacity - (i.ActiveWorkers ?? 0)} / {i.Capacity}</td>
-                  <td className="mono-dim">{Math.round((i.LastLoad ?? 0) * 100)}%</td>
-                  <td>{i.LastIP}:{i.ListenPort}</td>
-                  <td className="mono-dim">{fmtTime(i.LastHeartbeat)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Panel>
+      {/* 底部标签区 */}
+      <div className="dash-bottom">
+        <div className="bottom-tabs">
+          {([['archive', '归档文档'], ['command', '命令终端'], ['platforms', 'Agent 平台'], ['config', '配置开关']] as const).map(([k, label]) => (
+            <button key={k} className={`hud-btn${bottomTab === k ? ' hud-btn-active' : ''}`} onClick={() => setBottomTab(k)}>{label}</button>
+          ))}
+        </div>
+        {bottomTab === 'archive' && <ArchivePanel refreshKey={refreshKey} compact />}
+        {bottomTab === 'command' && <CommandPanel refreshKey={refreshKey} compact />}
+        {bottomTab === 'platforms' && <PlatformsPanel refreshKey={refreshKey} compact />}
+        {bottomTab === 'config' && <ConfigPanel compact />}
+      </div>
+    </div>
+  );
+}
 
-      <Panel title="集群拓扑" note="tower :8470 (UDP) / :8471 (HTTP)">
-        {incubators.length === 0 ? <Empty err={inc.err} /> : (
-          <div className="topology">
-            <div className="tower-node">◈ 调度塔 tower</div>
-            {incubators.map((i) => (
-              <div key={i.ID} className="incubator-row">
-                <span className="incubator-edge">└─▶</span>
-                <div className="incubator-node">
-                  <span className={statusClass(i.Status)}>● {i.Status}</span>
-                  {' '}<strong>{i.Name}</strong>
-                  <span className="mono-dim"> · {i.LastIP}:{i.ListenPort} · 槽位 {i.Capacity} · 心跳 {fmtTime(i.LastHeartbeat)}</span>
-                </div>
-              </div>
-            ))}
+// ── 提取的子组件（V3.5.13 布局改造）────────────────────────────
+
+function DispatchTable({ rows, err }: { rows: DispatchRow[]; err?: string | null }) {
+  if (rows.length === 0) return <Empty err={err} />;
+  return (
+    <table className="hud-table">
+      <thead>
+        <tr><th>子任务</th><th>ACK</th><th>下发</th><th>应答</th><th>msg_id</th></tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.id}>
+            <td>{r.subtask_id.slice(0, 8)}</td>
+            <td className={statusClass(r.ack_status)}>{r.ack_status}</td>
+            <td className="mono-dim">{fmtTime(r.dispatched_at)}</td>
+            <td className="mono-dim">{fmtTime(r.acked_at)}</td>
+            <td className="mono-dim">{r.msg_id.slice(0, 8)}…</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function ClusterTable({ incubators, err }: { incubators: Incubator[]; err?: string | null }) {
+  if (incubators.length === 0) return <Empty err={err} />;
+  return (
+    <table className="hud-table">
+      <thead><tr><th>名称</th><th>状态</th><th>槽位</th><th>地址</th></tr></thead>
+      <tbody>
+        {incubators.map((i) => (
+          <tr key={i.ID}>
+            <td>{i.Name}</td>
+            <td className={statusClass(i.Status)}>{i.Status}</td>
+            <td className="mono-dim">{i.Capacity - (i.ActiveWorkers ?? 0)}/{i.Capacity}</td>
+            <td className="mono-dim">{i.LastIP}:{i.ListenPort}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function TopologyView({ incubators, err }: { incubators: Incubator[]; err?: string | null }) {
+  if (incubators.length === 0) return <Empty err={err} />;
+  return (
+    <div className="topology">
+      <div className="tower-node">◈ tower</div>
+      {incubators.map((i) => (
+        <div key={i.ID} className="incubator-row">
+          <span className="incubator-edge">└─▶</span>
+          <div className="incubator-node">
+            <span className={statusClass(i.Status)}>● {i.Status}</span>{' '}
+            <strong>{i.Name}</strong>
+            <span className="mono-dim"> · {i.LastIP}:{i.ListenPort}</span>
           </div>
-        )}
-      </Panel>
+        </div>
+      ))}
+    </div>
+  );
+}
 
-      <Panel title="调度记录" note={`近 ${dispatch.length} 条`}>
-        {dispatch.length === 0 ? <Empty err={dsp.err} /> : (
-          <table className="hud-table">
-            <thead>
-              <tr>
-                <th>子任务</th>
-                <th>ACK 状态</th>
-                <th>下发时间</th>
-                <th>应答时间</th>
-                <th>msg_id</th>
-              </tr>
-            </thead>
-            <tbody>
-              {dispatch.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.subtask_id}</td>
-                  <td className={statusClass(r.ack_status)}>{r.ack_status}</td>
-                  <td className="mono-dim">{fmtTime(r.dispatched_at)}</td>
-                  <td className="mono-dim">{fmtTime(r.acked_at)}</td>
-                  <td className="mono-dim">{r.msg_id.slice(0, 8)}…</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Panel>
+// 聊天式事件流：时间正序（旧上新下），新事件自动跟随到底部
+function EventFeed({ events }: { events: StreamEvent[] }) {
+  const chatRef = React.useRef<HTMLDivElement>(null);
+  const stick = React.useRef(true);
 
-      <CommandPanel refreshKey={refreshKey} />
-      <ConfigPanel />
-      <PlatformsPanel refreshKey={refreshKey} />
+  React.useEffect(() => {
+    const el = chatRef.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [events]);
+
+  const onScroll = () => {
+    const el = chatRef.current;
+    if (!el) return;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
+
+  if (events.length === 0) {
+    return <p className="hint">等待事件。提交任务后此处实时推送全链路事件。</p>;
+  }
+  return (
+    <div ref={chatRef} onScroll={onScroll} style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{ marginTop: 'auto' }}>
+        {events.map((e, i) => {
+          const d = e.data ?? {};
+          const status = d.status ?? d.task_status ?? d.subtask?.status ?? d.layer;
+          return (
+            <div key={`${e.ts}-${i}`} className="chat-line">
+              <span className="chat-ts">{fmtTime(e.ts)}</span>
+              <span className="chat-ev">{e.event}</span>
+              <span className="mono-dim">{fmtEvent(e)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// 质量与预算精简视图（右列）
+function QualityBudgetView({ refreshKey, tasks }: { refreshKey: number; tasks: Task[] }) {
+  const spot = usePoll(api.spotChecks, 10000);
+  const cost = usePoll(() => api.costsSummary(), 15000);
+  const blocked = tasks.filter((t) => t.status === 'blocked' || t.status === 'partial_failure');
+  return (
+    <div>
+      {blocked.length > 0 && (
+        <div className="hud-failed" style={{ fontSize: 11, marginBottom: 6 }}>
+          ⚠ 受阻任务：{blocked.map((t) => t.goal.slice(0, 12)).join(' / ')}
+        </div>
+      )}
+      <div style={{ fontSize: 11 }}>
+        <div className="hud-completed">抽查：{spot.data?.length ?? 0} 次记录</div>
+        <div className="mono-dim">全局成本：{cost.data?.global_cents?.toFixed(1) ?? '0'} 分</div>
+        <div className="mono-dim">归档文档：看底部「归档文档」标签</div>
+      </div>
+      {spot.err && <p className="hud-failed" style={{ fontSize: 11 }}>{spot.err}</p>}
     </div>
   );
 }

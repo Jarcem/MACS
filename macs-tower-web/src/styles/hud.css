@@ -21,7 +21,9 @@
   --hud-font-mono: "JetBrains Mono", "Cascadia Code", "Sarasa Mono SC", Consolas, ui-monospace, monospace;
 }
 
-html, body {
+html, body, #root {
+  height: 100%;
+  overflow: hidden; /* V3.5.13 布局改造：固定一屏，页面级永不滚动 */
   margin: 0;
   background: var(--hud-bg-base);
   color: var(--hud-text);
@@ -31,23 +33,24 @@ html, body {
 }
 
 .page {
-  min-height: 100vh;
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 20px 20px 48px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
   background: var(--hud-bg-base);
+  overflow: hidden;
 }
 
 /* 页头：标题 + 关键指标，一条青色分隔线 */
 .page-head {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  gap: 20px;
-  flex-wrap: wrap;
+  gap: 16px;
   border-bottom: 2px solid rgba(53, 214, 238, 0.45);
-  padding-bottom: 12px;
-  margin-bottom: 16px;
+  padding-bottom: 6px;
 }
 
 .page-title {
@@ -71,8 +74,8 @@ html, body {
 }
 
 .kpi {
-  min-width: 108px;
-  padding: 8px 12px;
+  min-width: 92px;
+  padding: 3px 10px;
   background: var(--hud-bg-panel);
   border: 1px solid var(--hud-line);
   border-radius: 4px;
@@ -84,33 +87,92 @@ html, body {
 }
 
 .kpi-value {
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1.2;
 }
 
-/* 面板 */
+/* 面板：flex column，标题固定，内容区 .panel-scroll 内部滚动（聊天框语义） */
 .hud-panel {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--hud-bg-panel);
   border: 1px solid var(--hud-line);
   border-radius: 4px;
-  padding: 14px 16px;
-  margin-bottom: 14px;
+  padding: 10px 12px;
+  overflow: hidden;
 }
 
 .panel-title {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 0 0 10px;
-  font-size: 13px;
+  margin: 0 0 6px;
+  font-size: 12px;
   letter-spacing: 1px;
   color: var(--hud-cyan);
+  border-bottom: 1px solid var(--hud-line-soft);
+  padding-bottom: 3px;
 }
 
 .panel-title::before {
   content: "▸";
 }
+
+/* 面板内容滚动容器：聊天框式内部滚动（每面板独立滚动条） */
+.panel-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--hud-line) transparent;
+  padding-right: 4px;
+}
+.panel-scroll::-webkit-scrollbar { width: 6px; }
+.panel-scroll::-webkit-scrollbar-thumb { background: var(--hud-line); border-radius: 3px; }
+.panel-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 三列仪表盘（V3.5.13 布局改造）────────────────── */
+
+.dash {
+  flex: 1 1 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 0.9fr);
+  gap: 8px;
+  overflow: hidden;
+}
+
+.dash-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 底部标签区（审批/抽查/成本/归档/命令终端/平台/配置） */
+.dash-bottom {
+  flex-shrink: 0;
+  height: 26%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.bottom-tabs { display: flex; gap: 4px; flex-shrink: 0; overflow-x: auto; }
+
+/* 聊天式事件流 */
+.chat-line { padding: 2px 0; font-size: 11px; border-bottom: 1px dashed var(--hud-line-soft); }
+.chat-ts { color: var(--hud-text-dim); margin-right: 6px; }
+.chat-ev { color: var(--hud-cyan); margin-right: 6px; }
+.chat-stick { position: sticky; bottom: 0; text-align: center; font-size: 10px; color: var(--hud-text-dim); }
 
 .panel-note {
   font-size: 11px;
