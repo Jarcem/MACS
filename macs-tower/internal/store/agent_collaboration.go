@@ -555,6 +555,9 @@ const attemptSel = `SELECT ` + attemptCols + ` FROM execution_attempts `
 // InsertExecutionAttempt 每次尝试新 attempt_id；UNIQUE(step_id, attempt_no) 保证重试序号单调
 func (s *Store) InsertExecutionAttempt(a ExecutionAttempt) (ExecutionAttempt, error) {
 	ts := now()
+	if a.AttemptID == "" {
+		a.AttemptID = NewID()
+	}
 	if a.Status == "" {
 		a.Status = "pending"
 	}
@@ -618,10 +621,13 @@ func (s *Store) SetExecutionAttemptStatus(attemptID, status string) (bool, error
 	return n == 1, nil
 }
 
+// FormatLease 租约时间戳固定宽度格式（毫秒精度；保证字符串比较 == 时间比较）
+func FormatLease(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
+
 // SetExecutionAttemptLease 分派后设置租约（到期由 AgentScheduler 看门狗回收）
 func (s *Store) SetExecutionAttemptLease(attemptID string, leaseExpiresAt time.Time) error {
 	_, err := s.db.Exec(`UPDATE execution_attempts SET lease_expires_at=? WHERE attempt_id=?`,
-		leaseExpiresAt.UTC().Format(time.RFC3339), attemptID)
+		FormatLease(leaseExpiresAt), attemptID)
 	return err
 }
 
@@ -670,7 +676,7 @@ func (s *Store) ListInflightAttemptsByConnector(connectorID string) ([]Execution
 
 // ListExpiredAttempts 租约到期且未终态的尝试（AgentScheduler 看门狗回收）
 func (s *Store) ListExpiredAttempts(nowTS string) ([]ExecutionAttempt, error) {
-	rows, err := s.db.Query(attemptSel+`WHERE status IN ('dispatched','running') AND lease_expires_at <> '' AND lease_expires_at < ?`, nowTS)
+	rows, err := s.db.Query(attemptSel+`WHERE status IN ('dispatched','running','unknown') AND lease_expires_at <> '' AND lease_expires_at < ?`, nowTS)
 	if err != nil {
 		return nil, err
 	}

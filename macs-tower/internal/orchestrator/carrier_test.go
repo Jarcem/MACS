@@ -13,7 +13,6 @@ import (
 // 会话载体亲和（V3.5.8）：任务已有 carrier → 只派给载体孵化器；
 // 载体不可用（离线/熔断/预算暂停）→ 回退全选机（新会话，carrier 随 HandleResult 更新）
 
-
 // 亲和：任务 carrier 指向 inc-b → 只返回 inc-b（即使 inc-c 空槽更多）
 func TestCarrierAffinityPinsIncubator(t *testing.T) {
 	st, _, orch := newTestStack(t)
@@ -30,7 +29,7 @@ func TestCarrierAffinityPinsIncubator(t *testing.T) {
 		CarrierIncubator: "inc-b", CarrierSession: "sess-42"}
 	if err := st.InsertTaskWithSubtasks(task, []store.Subtask{
 		{ID: store.NewID(), TaskID: task.ID, Seq: 2, Status: "pending",
-			Payload: `{"mode":"session_agent","session":{"driver":"claude"}}`,
+			Payload:        `{"mode":"session_agent","session":{"driver":"claude"}}`,
 			RequiredDriver: "session_agent", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"},
 	}); err != nil {
 		t.Fatal(err)
@@ -58,7 +57,7 @@ func TestCarrierFallbackWhenOffline(t *testing.T) {
 		CarrierIncubator: "inc-b", CarrierSession: "sess-42"}
 	if err := st.InsertTaskWithSubtasks(task, []store.Subtask{
 		{ID: store.NewID(), TaskID: task.ID, Seq: 1, Status: "pending",
-			Payload: `{"mode":"session_agent","session":{"driver":"claude"}}`,
+			Payload:        `{"mode":"session_agent","session":{"driver":"claude"}}`,
 			RequiredDriver: "session_agent", CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z"},
 	}); err != nil {
 		t.Fatal(err)

@@ -33,32 +33,32 @@ var ErrBadPlan = errors.New("invalid plan")
 
 // PlanStep 外部 Agent 接入的执行步骤；mode 全集见 Worker Run
 type PlanStep struct {
-	Mode      string            `json:"mode"`
-	Title     string            `json:"title,omitempty"`
-	Text      string            `json:"text,omitempty"`
-	Review    bool              `json:"review,omitempty"` // 显式要求独立复核（Agent 模式默认免复核）
+	Mode   string `json:"mode"`
+	Title  string `json:"title,omitempty"`
+	Text   string `json:"text,omitempty"`
+	Review bool   `json:"review,omitempty"` // 显式要求独立复核（Agent 模式默认免复核）
 	// cli_agent
-	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	Cwd       string            `json:"cwd,omitempty"`
-	Stdin     string            `json:"stdin,omitempty"`
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Cwd     string   `json:"cwd,omitempty"`
+	Stdin   string   `json:"stdin,omitempty"`
 	// http_agent
-	URL       string            `json:"url,omitempty"`
-	Method    string            `json:"method,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Body      string            `json:"body,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Method  string            `json:"method,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    string            `json:"body,omitempty"`
 	// openai_compatible / anthropic（6.4.9 协议驱动；凭据在孵化器侧注入，不下发）
-	Model     string            `json:"model,omitempty"`
-	Prompt    string            `json:"prompt,omitempty"`
-	System    string            `json:"system,omitempty"`
-	MaxTokens int               `json:"max_tokens,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
+	System    string `json:"system,omitempty"`
+	MaxTokens int    `json:"max_tokens,omitempty"`
 
 	// 会话载体（§6.4.9 CLI Native 扩展）：标记后该步骤在终端 Agent 工具的
 	// 同一 session 内执行，子 Worker 于 session 中连续孵化（上下文累积）
 	Session *SessionSpec `json:"session,omitempty"`
 
-	TimeoutMs int64  `json:"timeout_ms,omitempty"`
-	DependsOn []int  `json:"depends_on,omitempty"`
+	TimeoutMs int64 `json:"timeout_ms,omitempty"`
+	DependsOn []int `json:"depends_on,omitempty"`
 }
 
 // SessionSpec 会话载体规格（透传给孵化器；driver=claude 有预设，其余 generic 显式模板）
@@ -116,11 +116,11 @@ func New(st *store.Store, disp *dispatcher.Dispatcher, hub *events.Hub,
 
 func (o *Orchestrator) Start() {
 	go o.loop()
-	go o.watchdog()       // 6.5 Worker TTL 兜底清理 + 重试退避回池
-	go o.leaseWatchdog()  // M2.6 §6.4.3.1 确定性租约回收（5s；TTL 仅为兜底）
-	go o.rebalancer()     // 6.4.7 rebalanceTick
-	go o.monthlyReset()   // 6.5 预算月度重置
-	go o.taskWatchdog()   // 任务级确定性 Watchdog（停滞/连续同错 → 告警）
+	go o.watchdog()      // 6.5 Worker TTL 兜底清理 + 重试退避回池
+	go o.leaseWatchdog() // M2.6 §6.4.3.1 确定性租约回收（5s；TTL 仅为兜底）
+	go o.rebalancer()    // 6.4.7 rebalanceTick
+	go o.monthlyReset()  // 6.5 预算月度重置
+	go o.taskWatchdog()  // 任务级确定性 Watchdog（停滞/连续同错 → 告警）
 }
 
 // leaseWatchdog M2.6 §6.4.3.1 确定性租约回收（每 5s；now 由调用方注入算法）：
@@ -267,8 +267,10 @@ func (o *Orchestrator) budgetSuspendedFor(id string) bool {
 }
 
 // taskWatchdog 任务级确定性 Watchdog（60s tick）：
-//   stalled（长时间无事件）  任务 updated_at 超 30min 无变化且仍有在途子任务 → watchdog_event(stalled_task)
-//   repeated（连续同错）     最近 ≥3 个 failed 子任务错误完全一致 → watchdog_event(needs_human)
+//
+//	stalled（长时间无事件）  任务 updated_at 超 30min 无变化且仍有在途子任务 → watchdog_event(stalled_task)
+//	repeated（连续同错）     最近 ≥3 个 failed 子任务错误完全一致 → watchdog_event(needs_human)
+//
 // 两者均落 guardrail_events + SSE 广播，不自动干预（只告警，防误判）
 func (o *Orchestrator) taskWatchdog() {
 	t := time.NewTicker(60 * time.Second)
@@ -415,18 +417,18 @@ func (o *Orchestrator) SubmitPlan(req TaskRequest) (store.Task, error) {
 
 // Result 孵化器 execution_result 载荷（V3.0 遥测扩展 + 自检报告内嵌）
 type Result struct {
-	SubtaskID   string `json:"subtask_id"`
-	IncubatorID string `json:"incubator_id"`
-	WorkerID    string `json:"worker_id"`
-	Status      string `json:"status"`
-	Result      string `json:"result"`
-	Error       string `json:"error"`
-	DurationMs  int64  `json:"duration_ms"`
-	StartedAt   string `json:"started_at"`
-	FinishedAt  string `json:"finished_at"`
-	Fingerprint string `json:"fingerprint"`
-	SessionID   string `json:"session_id"`
-	AttemptCount int  `json:"attempt_count"` // M2.6 §6.4.3.2：结果按 attempt 条件核销 // 会话载体回执（同任务后续子 Worker 在同一 session 孵化）
+	SubtaskID    string `json:"subtask_id"`
+	IncubatorID  string `json:"incubator_id"`
+	WorkerID     string `json:"worker_id"`
+	Status       string `json:"status"`
+	Result       string `json:"result"`
+	Error        string `json:"error"`
+	DurationMs   int64  `json:"duration_ms"`
+	StartedAt    string `json:"started_at"`
+	FinishedAt   string `json:"finished_at"`
+	Fingerprint  string `json:"fingerprint"`
+	SessionID    string `json:"session_id"`
+	AttemptCount int    `json:"attempt_count"` // M2.6 §6.4.3.2：结果按 attempt 条件核销 // 会话载体回执（同任务后续子 Worker 在同一 session 孵化）
 	// §6.4.13.2 遥测扩展
 	Telemetry *udpTelemetry `json:"telemetry_metrics,omitempty"`
 }
@@ -437,10 +439,10 @@ type udpTelemetry struct {
 		Completion int `json:"completion"`
 		Cached     int `json:"cached"`
 	} `json:"token_usage,omitempty"`
-	CostCents    float64 `json:"cost_cents"`
-	CurrentStep  string  `json:"current_step"`
-	PlatformAdapter string `json:"platform_adapter"`
-	AgentPlatform   string `json:"agent_platform"`
+	CostCents       float64 `json:"cost_cents"`
+	CurrentStep     string  `json:"current_step"`
+	PlatformAdapter string  `json:"platform_adapter"`
+	AgentPlatform   string  `json:"agent_platform"`
 }
 
 // HandleResult 处理孵化器上行 execution_result（网关调用；幂等：终态重复回传直接吸收）
@@ -763,7 +765,6 @@ func (o *Orchestrator) CancelTask(taskID string) (CancelResult, error) {
 	}, nil
 }
 
-
 // ── 调度主循环（6.4.7 selectIncubator + 6.4.3 dispatchToIncubators）──
 
 func (o *Orchestrator) schedule() {
@@ -912,7 +913,8 @@ func (o *Orchestrator) failSubtask(sub store.Subtask, reason string) {
 }
 
 // selectIncubators 6.4.7 评分选机（top-K 候选，默认 K=3）
-//   score = 0.45*idle_score + 0.35*load_score + template_bonus(0) + spread_penalty
+//
+//	score = 0.45*idle_score + 0.35*load_score + template_bonus(0) + spread_penalty
 func (o *Orchestrator) selectIncubators(incs []store.Incubator, running map[string]int, s store.Subtask, taskID string) []*store.Incubator {
 	driver := requiredDriverOf(s)
 

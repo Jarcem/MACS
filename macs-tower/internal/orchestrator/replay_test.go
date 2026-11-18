@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"macs.local/tower/internal/archive"
 	"macs.local/tower/internal/approvals"
+	"macs.local/tower/internal/archive"
 	"macs.local/tower/internal/billing"
 	"macs.local/tower/internal/dispatcher"
 	"macs.local/tower/internal/events"
@@ -143,7 +143,7 @@ func TestReviewResultReplayIdempotency(t *testing.T) {
 	verdict := `{"review":{"status":"approved","fingerprint_match":true,"note":"指纹一致"}}`
 	for i := 0; i < 100; i++ {
 		orch.HandleResult(Result{SubtaskID: review.ID, Status: "completed", Result: verdict,
-		WorkerID: "w", IncubatorID: "inc-1", AttemptCount: 1})
+			WorkerID: "w", IncubatorID: "inc-1", AttemptCount: 1})
 	}
 
 	got, _ := st.GetSubtask(subA.ID)
