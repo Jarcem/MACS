@@ -2,6 +2,11 @@ module macs.local/incubator
 
 go 1.22
 
+require (
+	github.com/coder/websocket v1.8.12
+	macs.local/tower v0.0.0
+)
+
 require modernc.org/sqlite v1.30.0
 
 require (
@@ -19,3 +24,5 @@ require (
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 )
+
+replace macs.local/tower => ../macs-tower

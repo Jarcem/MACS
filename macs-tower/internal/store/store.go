@@ -23,6 +23,9 @@ func (s *Store) Close() error { return s.db.Close() }
 // Exec 暴露底层执行（测试 DDL 装配用）
 func (s *Store) Exec(query string, args ...any) (sql.Result, error) { return s.db.Exec(query, args...) }
 
+// Begin 事务入口（agentdir 标注等需要多写一致性的场景）
+func (s *Store) Begin() (*sql.Tx, error) { return s.db.Begin() }
+
 type Incubator struct {
 	ID, Name, Status string
 	Capacity         int
