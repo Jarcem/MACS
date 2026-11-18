@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jarcem
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { AgentCollabPanel } from './AgentCollabPanel';
 import { api, type Incubator, type DispatchRow, type PlanStep, type Task, type Approval, type SpotCheck, type ArchiveDoc, type CostSummary, type AgentPlatform, type CommandTerminal } from './api';
 
 // 状态色语义（UI 设计 8.2：绿=成功 / 蓝=进行中 / 灰=中性 / 琥珀=警告 / 红=失败）
@@ -825,7 +826,7 @@ export function App() {
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [lastAt, setLastAt] = useState('-');
   const [refreshKey, setRefreshKey] = useState(0);
-  const [bottomTab, setBottomTab] = useState<'archive' | 'command' | 'platforms' | 'config'>('command');
+  const [bottomTab, setBottomTab] = useState<'archive' | 'command' | 'platforms' | 'config' | 'agents'>('command');
   const bump = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const live = useEventStream((ev) => {
@@ -935,7 +936,7 @@ export function App() {
       {/* 底部标签区 */}
       <div className="dash-bottom">
         <div className="bottom-tabs">
-          {([['archive', '归档文档'], ['command', '命令终端'], ['platforms', 'Agent 平台'], ['config', '配置开关']] as const).map(([k, label]) => (
+          {([['archive', '归档文档'], ['command', '命令终端'], ['platforms', 'Agent 平台'], ['config', '配置开关'], ['agents', 'Agent 协作 V1.5']] as const).map(([k, label]) => (
             <button key={k} className={`hud-btn${bottomTab === k ? ' hud-btn-active' : ''}`} onClick={() => setBottomTab(k)}>{label}</button>
           ))}
         </div>
@@ -943,6 +944,7 @@ export function App() {
         {bottomTab === 'command' && <CommandPanel refreshKey={refreshKey} compact />}
         {bottomTab === 'platforms' && <PlatformsPanel refreshKey={refreshKey} compact />}
         {bottomTab === 'config' && <ConfigPanel compact />}
+        {bottomTab === 'agents' && <AgentCollabPanel refreshKey={refreshKey} compact />}
       </div>
     </div>
   );

@@ -24,6 +24,19 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function put<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('macs_token') ?? ''}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`PUT ${path} -> ${res.status} ${text}`);
+  }
+  return (await res.json()) as T;
+}
+
 // 列表端点解包：契约响应 { data: [...], page, pageSize }
 async function getList<T>(path: string): Promise<T[]> {
   const r = await get<{ data?: T[] } | T[]>(path);
@@ -132,6 +145,59 @@ export interface CommandAuditRow {
   exit_code: number; msg_id: string; duration_ms: number; reject: string; created_at: string;
 }
 
+// ── V1.5 位置无关 Agent 协作 ──────────────────────────
+
+export interface AgentConnector {
+  id: string; name: string; credential_id: string; protocol_version: string;
+  online_status: string; health_status: string; last_seen: string; revoked_at: string;
+}
+
+export interface AgentInstance {
+  id: string; connector_id: string; local_agent_key: string; display_name: string;
+  platform_id: string; adapter_type: string;
+  role_tags: string[]; capability_tags: string[]; environment_tags: string[];
+  identity_status: string; verified_by: string; verified_at: string; revision: number;
+  online_status: string; health_status: string;
+}
+
+export interface AgentAction {
+  id: string; agent_id: string; action_key: string; action_kind: string; adapter_type: string;
+  risk_level: string; retry_policy: string; max_attempts: number; validator_keys: string[];
+  config_ref: string; enabled: boolean; revision: number;
+}
+
+export interface AgentCatalogAction {
+  action_id: string; action_key: string; action_kind: string; adapter_type: string;
+  retry_policy: string; max_attempts: number; validator_keys: string[];
+}
+
+export interface AgentCatalogAgent {
+  agent_id: string; connector_id: string; local_agent_key: string; display_name: string;
+  platform_id: string; adapter_type: string; online_status: string;
+  role_tags: string[]; capability_tags: string[]; environment_tags: string[];
+  actions: AgentCatalogAction[];
+}
+
+export interface PlanRevision {
+  task_id: string; revision: number; source: string; status: string;
+  draft_json: string; catalog_digest: string; approved_by: string; approved_at: string;
+}
+
+export interface AgentTask {
+  task_id: string; title: string; goal: string; status: string; created_at: string; updated_at: string;
+}
+
+export interface ExecutionAttempt {
+  attempt_id: string; task_id: string; step_id: string; plan_revision: number; attempt_no: number;
+  agent_id: string; action_id: string; environment: string; input_digest: string;
+  status: string; acceptance_status: string; result_json: string;
+  lease_expires_at: string; created_at: string; finished_at: string;
+}
+
+export interface IdentityAudit {
+  id: string; agent_id: string; task_id: string; actor: string; action: string; patch_json: string; created_at: string;
+}
+
 export const api = {
   incubators: () => getList<Incubator>('/api/v1/incubators'),
   dispatchLog: () => getList<DispatchRow>('/api/v1/dispatch-log'),
@@ -194,4 +260,32 @@ export const api = {
   execCommand: (id: string, command: string) =>
     post<{ msg_id: string }>(`/api/v1/command-terminals/${id}/exec`, { command }),
   commandAudit: (id: string) => getList<CommandAuditRow>(`/api/v1/command-terminals/${id}/audit`),
+
+  // V1.5 Agent 协作
+  agentConnectors: () => getList<AgentConnector>('/api/v1/agent-connectors'),
+  registerAgentConnector: (name: string) =>
+    post<{ data: { connector_id: string; name: string; credential: string } }>('/api/v1/agent-connectors', { name }),
+  revokeAgentConnector: (id: string) => post(`/api/v1/agent-connectors/${id}/revoke`),
+  agentInstances: (status?: string) => getList<AgentInstance>(`/api/v1/agent-instances${status ? `?status=${status}` : ''}`),
+  verifyAgentInstance: (id: string, patch: {
+    display_name: string; platform_id: string; adapter_type: string;
+    role_tags: string[]; capability_tags: string[]; environment_tags: string[];
+    expected_revision: number; actor: string;
+  }) => post(`/api/v1/agent-instances/${id}/verify`, patch),
+  disableAgentInstance: (id: string) => post(`/api/v1/agent-instances/${id}/disable`, { actor: 'admin' }),
+  agentActions: (agentId?: string) => getList<AgentAction>(`/api/v1/agent-actions${agentId ? `?agent_id=${agentId}` : ''}`),
+  upsertAgentAction: (a: {
+    agent_id: string; action_key: string; adapter_type: string; validator_keys: string[];
+    retry_policy?: string; max_attempts?: number; config_ref?: string; enabled: boolean;
+  }) => put('/api/v1/agent-actions', a),
+  agentCatalog: () => get<{ data: { agents: AgentCatalogAgent[] } }>('/api/v1/agent-catalog'),
+  submitAgentPlan: (draft: unknown, source = 'manual') =>
+    post<{ data: PlanRevision }>('/api/v1/agent-plans', { draft, source }),
+  agentPlans: (taskId: string) => getList<PlanRevision>(`/api/v1/agent-plans?task_id=${taskId}`),
+  approveAgentPlan: (taskId: string, revision: number) =>
+    post(`/api/v1/agent-plans/${taskId}/revisions/${revision}/approve`, { approved_by: 'admin' }),
+  agentTasks: (status?: string) => getList<AgentTask>(`/api/v1/agent-tasks${status ? `?status=${status}` : ''}`),
+  agentAttempts: (taskId: string) => getList<ExecutionAttempt>(`/api/v1/agent-tasks/${taskId}/attempts`),
+  cancelAgentTask: (taskId: string) => post(`/api/v1/agent-tasks/${taskId}/cancel`),
+  identityAudit: () => getList<IdentityAudit>('/api/v1/agent-identity-audit'),
 };

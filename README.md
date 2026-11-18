@@ -464,6 +464,36 @@ curl -X POST http://127.0.0.1:8471/api/v1/tasks -H "Content-Type: application/js
 | POST           | `/api/v1/incubators/{id}/rotate-token`          | Rotate incubator registration token (danger scope; shown once)         |
 | GET/POST       | `/api/v1/notify-channels`                       | Alert notification channels (webhook first; POST = danger scope)       |
 | POST           | `/api/v1/dispatch`                              | Manual dispatch (debugging, ops scope)                                 |
+| GET            | `/agent/connect`                                | **V1.5** WSS agent channel (auth via hello: credential hash + protocol; Connector outbound-only) |
+| GET/POST       | `/api/v1/agent-connectors` · `/{id}/revoke`     | **V1.5** Connector registry (SHA-256 credential, plaintext shown once; POST/revoke = danger) |
+| GET            | `/api/v1/agent-instances`                       | **V1.5** Agent candidate/identity directory (`?status=pending\|verified\|disabled`) |
+| POST           | `/api/v1/agent-instances/{id}/verify` · `/{id}/disable` | **V1.5** Human annotation (optimistic-lock revision; ops scope) |
+| GET/PUT        | `/api/v1/agent-actions`                         | **V1.5** Action registry (validator whitelist, retry policy; PUT = ops) |
+| GET            | `/api/v1/agent-catalog`                         | **V1.5** Verified catalog snapshot (planning input)                    |
+| POST           | `/api/v1/agent-plans`                           | **V1.5** Submit PlanDraft (forbidden fields rejected; ops scope)       |
+| POST           | `/api/v1/agent-plans/{task}/revisions/{rev}/approve` | **V1.5** Approve plan → frozen assignment + input_digest (danger scope) |
+| GET            | `/api/v1/agent-tasks` · `/{id}/attempts` · `/{id}/artifacts` | **V1.5** Collaboration tasks / attempts / shared-storage artifacts |
+| POST           | `/api/v1/agent-tasks/{id}/cancel`               | **V1.5** Cancel collaboration task (ops scope)                         |
+| GET            | `/api/v1/agent-identity-audit`                  | **V1.5** Annotation/approval audit trail                               |
+
+<br/>
+
+### V1.5 Agent collaboration quickstart
+
+```bash
+# 1) Register a Connector (credential is returned once; store it in the Connector's local config only)
+curl -X POST http://127.0.0.1:8471/api/v1/agent-connectors -d '{"name":"mac-dev"}'
+
+# 2) Start the incubator in Connector mode (outbound WSS only, no inbound ports)
+#    connector.json: tower_url=wss://…/agent/connect, connector_id, credential, agents[].actions[]
+MACS_CONNECTOR_CONFIG=connector.json ./macs-incubator
+
+# 3) Annotate the reported candidate as verified (web board → "Agent 协作 V1.5" tab, or API)
+# 4) Submit a PlanDraft → approve → tower dispatches via WSS to the frozen agent
+# 5) Results must carry a structured self_check; missing/failed self-check never passes acceptance
+```
+
+Cross-machine artifacts travel via shared storage (`s3://` / `oci://` / `https://` URIs only; local paths are rejected) and are verified against their SHA-256 digest before execution. Real-environment contract E2E (`macs-tower/test/e2e`, `MACS_RUN_REAL_AGENT_CONTRACT=1`) is BLOCKED-skip until admin-provided action configs exist — mocks do not count as passing.
 
 <br/>
 
@@ -495,13 +525,17 @@ Yes. The board depends only on the tower's `/api/v1`. For a terminal form factor
 macs/
 ├─ macs-tower/          Control tower (Go): UDP gateway / dispatcher / orchestrator / cluster / store / events
 │  ├─ cmd/tower/        Entrypoint (UDP :8470 + HTTP :8471)
+│  ├─ agentmsg/         V1.5 WSS envelope protocol (shared with connector via replace)
 │  ├─ internal/         gateway dispatcher orchestrator cluster registry store events udp
 │  │                    quality (review + spot check) approvals trace archive
 │  │                    billing templates unified (M6 protocol) cmdterm (M8) authz
+│  │                    agentdir (V1.5 identity) agentgate (V1.5 WSS) plan acceptance
+│  ├─ test/e2e/         V1.5 real-environment contract E2E (BLOCKED-skip without env)
 │  └─ migrations/       0001_init / 0002_tasks / 0003_quality (all M3~M8 tables)
 ├─ macs-incubator/      Incubator (Go): register / listen / slotted workers / upload / offline buffer
 │  ├─ cmd/incubator/    Entrypoint (UDP :8473; dispatch_inbox dedup + rollback)
 │  ├─ internal/         worker (self-check / review / OpenAI / Anthropic drivers) probe store
+│  │                    connector (V1.5: outbound WSS client / outbox / registry / artifacts)
 │  └─ src/db/migrations/ Local SQLite schema
 ├─ macs-cmdterm/        Controlled command terminal (Go, :8472): HMAC signing / allowlist / audit / register retry
 ├─ macs-tower-web/      Admin console (React + Vite): dark single-page HUD (approvals / quality / cost / archive / terminals / platforms)
@@ -525,6 +559,7 @@ macs/
 - ✅ **M7 DSH monitoring terminal**: Ink TUI read-only monitor (REST/SSE data source aligned with the web HUD)
 - ✅ **M8 Command terminal**: per-terminal keys + HMAC-signed issuance (60s replay window) + allowlisted execution + register-ACK retry + audit reconciliation + secret rotation
 - ✅ **M2.6 Task-lifecycle stopgap**: mode-aware leases + 5s leaseWatchdog recovery (wired into Start), per-kind conditional finalization for both normal (FinishSubtaskAttempt wired, side effects strictly post-finalization) and review paths, forced cancellation (single transaction + durable cancel tombstones + unicast + full closing), SSE frame spec (id line / Last-Event-ID replay / 15s heartbeat / slow-client disconnect), task-level deterministic watchdog (stalled / repeated-error alerts)
+- ✅ **V1.5 Location-independent Agent collaboration (implemented, real-environment E2E pending acceptance)**: WSS-only control channel + Connector/AgentInstance/AgentAction identity directory + human annotation (pending→verified) + PlanDraft validation (forbidden-field rejection) + human approval (frozen assignment + input_digest) + step dependencies with cross-machine artifact exchange (SHA-256 verified) + structured results with fail-closed acceptance + outbox / idempotency / reconnect reconciliation
 - ⚪ PostgreSQL production rollout + multi-tower federation
 
 **Known boundaries** (current development progress and verified status):

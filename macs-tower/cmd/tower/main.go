@@ -12,9 +12,11 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -24,6 +26,9 @@ import (
 	"strings"
 	"time"
 
+	"macs.local/tower/agentmsg"
+	"macs.local/tower/internal/agentdir"
+	"macs.local/tower/internal/agentgate"
 	"macs.local/tower/internal/approvals"
 	"macs.local/tower/internal/archive"
 	"macs.local/tower/internal/authz"
@@ -34,6 +39,7 @@ import (
 	"macs.local/tower/internal/events"
 	"macs.local/tower/internal/gateway"
 	"macs.local/tower/internal/orchestrator"
+	"macs.local/tower/internal/plan"
 	"macs.local/tower/internal/quality"
 	"macs.local/tower/internal/registry"
 	"macs.local/tower/internal/store"
@@ -121,8 +127,8 @@ func main() {
 	qualCfg := quality.Config{
 		ReviewEnabled:    envBool("MACS_FEATURE_REVIEW", true),
 		SpotCheckEnabled: envBool("MACS_FEATURE_SPOT_CHECK", false), // 10.3 默认 false
-		SpotCheckRatio:   envInt("MACS_SPOT_CHECK_RATIO", 20),        // Q7 默认 20%
-		MaxReviewRounds:  envInt("MACS_MAX_REVIEW_ROUNDS", 3),        // Q5
+		SpotCheckRatio:   envInt("MACS_SPOT_CHECK_RATIO", 20),       // Q7 默认 20%
+		MaxReviewRounds:  envInt("MACS_MAX_REVIEW_ROUNDS", 3),       // Q5
 	}
 	bill := billing.New(st, hub, appr)
 	var orch *orchestrator.Orchestrator // 声明在前：quality 的 kick 闭包引用编排器
@@ -140,6 +146,16 @@ func main() {
 	if err := templates.Seed(st); err != nil {
 		log.Fatalf("seed templates: %v", err)
 	}
+
+	// ── V1.5：位置无关 Agent 协作（WSS 网关 + 冻结分派调度器，设计 §2）──
+	// WSS 是唯一跨网络 Agent 控制通道；与 2.x UDP 编排路径并存（旧路径服务 /api/v1/tasks）
+	agw := agentgate.New(st)
+	agentSched := orchestrator.NewAgentScheduler(st, agw, hub, orchestrator.AgentSchedConfig{
+		LeaseTTL:    time.Duration(envInt("MACS_AGENT_LEASE_TTL_MIN", 30)) * time.Minute,
+		MaxAttempts: envInt("MACS_AGENT_MAX_ATTEMPTS", 3),
+	})
+	agw.SetMessageHandler(agentSched.HandleAgentResult)
+	agw.SetEventHandler(func(kind string, data map[string]any) { hub.Publish(kind, data) })
 
 	// ── M8：塔侧命令终端 ──
 	ct := cmdterm.New(st, hub, conn)
@@ -160,6 +176,7 @@ func main() {
 	appr.StartExpireSweeper()
 
 	orch.Start()
+	agentSched.Start()
 	cm.StartSweeper()
 	disp.StartJanitor() // 6.5 ACK 兜底：塔重启后卡住的 dispatch 行 E13 标失败、子任务回池
 	defer cm.Close()
@@ -215,13 +232,13 @@ func main() {
 	// §6.4.13.2 遥测流 / 平台事件上行 → telemetry_events
 	gw.On(udp.MsgTelemetryStream, func(e udp.Envelope, _ *net.UDPAddr) ([]byte, error) {
 		var p struct {
-			TaskID    string `json:"task_id"`
-			SubtaskID string `json:"subtask_id"`
-			WorkerID  string `json:"worker_id"`
-			EventType string `json:"event_type"`
-			Payload   map[string]any `json:"payload"`
-			PlatformAdapter string `json:"platform_adapter"`
-			AgentPlatform  string `json:"agent_platform"`
+			TaskID          string         `json:"task_id"`
+			SubtaskID       string         `json:"subtask_id"`
+			WorkerID        string         `json:"worker_id"`
+			EventType       string         `json:"event_type"`
+			Payload         map[string]any `json:"payload"`
+			PlatformAdapter string         `json:"platform_adapter"`
+			AgentPlatform   string         `json:"agent_platform"`
 		}
 		if json.Unmarshal(e.Payload, &p) != nil || p.EventType == "" {
 			return nil, errors.New("malformed telemetry_stream")
@@ -239,13 +256,13 @@ func main() {
 	})
 	gw.On(udp.MsgPlatformEvent, func(e udp.Envelope, _ *net.UDPAddr) ([]byte, error) {
 		var p struct {
-			TaskID    string `json:"task_id"`
-			SubtaskID string `json:"subtask_id"`
-			WorkerID  string `json:"worker_id"`
-			EventType string `json:"event_type"`
-			Payload   map[string]any `json:"payload"`
-			PlatformAdapter string `json:"platform_adapter"`
-			AgentPlatform  string `json:"agent_platform"`
+			TaskID          string         `json:"task_id"`
+			SubtaskID       string         `json:"subtask_id"`
+			WorkerID        string         `json:"worker_id"`
+			EventType       string         `json:"event_type"`
+			Payload         map[string]any `json:"payload"`
+			PlatformAdapter string         `json:"platform_adapter"`
+			AgentPlatform   string         `json:"agent_platform"`
 		}
 		if json.Unmarshal(e.Payload, &p) != nil || p.EventType == "" {
 			return nil, errors.New("malformed platform_event")
@@ -762,7 +779,7 @@ func main() {
 
 		ch, cancel := hub.Subscribe()
 		defer cancel()
-		seq := hub.Seq() // 实时流 id 基准（断线回放以 telemetry_events 自增 id 为准）
+		seq := hub.Seq()                       // 实时流 id 基准（断线回放以 telemetry_events 自增 id 为准）
 		tk := time.NewTicker(15 * time.Second) // §6.4.13.4.1：15s 心跳
 		defer tk.Stop()
 		for {
@@ -1011,6 +1028,259 @@ func main() {
 			"dispatch_status":   []string{"pending", "sent", "retransmitted", "acked", "driver_mismatch", "failed", "duplicate"},
 			"color":             colorOf,
 		})
+	})
+
+	// ── V1.5 Agent 协作（设计 §2/§4/§5）────────────────────────
+	// WSS 固定入口：Connector 仅出站连入；认证走 hello（凭据哈希+协议版本），不走 admin token
+	mux.HandleFunc("GET /agent/connect", agw.HandleConnect)
+
+	// Connector 登记（凭据只存 SHA-256，明文不落库/不进日志，设计 §10）
+	mux.HandleFunc("POST /api/v1/agent-connectors", guard(authz.ScopeDanger, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID         string `json:"id"`
+			Name       string `json:"name"`
+			Credential string `json:"credential"` // 可空：塔生成一次性明文（仅在响应中出现一次）
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Name) == "" {
+			apiErr(w, 400, 66400, "name required")
+			return
+		}
+		if req.ID == "" {
+			req.ID = "conn-" + store.NewID()
+		}
+		if req.Credential == "" {
+			req.Credential = store.NewID() + store.NewID()
+		}
+		sum := sha256.Sum256([]byte(req.Credential))
+		c := store.Connector{
+			ID: req.ID, Name: req.Name, CredentialID: req.Name,
+			CredentialHash: hex.EncodeToString(sum[:]), ProtocolVersion: agentmsg.ProtocolVersion,
+		}
+		if err := st.UpsertConnector(c); err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		hub.Publish("agent_connector_registered", map[string]any{"connector_id": c.ID, "name": c.Name})
+		wj(w, map[string]any{"data": map[string]any{
+			"connector_id": c.ID, "name": c.Name, "credential": req.Credential, // 仅此一次返回明文
+		}})
+	}))
+
+	mux.HandleFunc("GET /api/v1/agent-connectors", func(w http.ResponseWriter, _ *http.Request) {
+		list, err := st.ListConnectors()
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
+	})
+
+	mux.HandleFunc("POST /api/v1/agent-connectors/{id}/revoke", guard(authz.ScopeDanger, func(w http.ResponseWriter, r *http.Request) {
+		if err := st.RevokeConnector(r.PathValue("id")); err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		hub.Publish("agent_connector_revoked", map[string]any{"connector_id": r.PathValue("id")})
+		wj(w, map[string]any{"data": "revoked"})
+	}))
+
+	// 候选/身份目录（read）
+	mux.HandleFunc("GET /api/v1/agent-instances", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListAgentInstances(r.URL.Query().Get("status"))
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
+	})
+
+	// 人工标注（设计 §4）：pending → verified，乐观锁
+	mux.HandleFunc("POST /api/v1/agent-instances/{id}/verify", guard(authz.ScopeOps, func(w http.ResponseWriter, r *http.Request) {
+		var p agentdir.VerifyPatch
+		if json.NewDecoder(r.Body).Decode(&p) != nil {
+			apiErr(w, 400, 66400, "invalid verify patch")
+			return
+		}
+		if p.Actor == "" {
+			p.Actor = "admin"
+		}
+		inst, err := agentdir.NewService(st).Verify(r.PathValue("id"), p)
+		if err != nil {
+			apiErr(w, 400, 66401, err.Error())
+			return
+		}
+		hub.Publish("agent_verified", map[string]any{"agent_id": inst.ID, "display_name": inst.DisplayName})
+		wj(w, map[string]any{"data": inst})
+	}))
+
+	mux.HandleFunc("POST /api/v1/agent-instances/{id}/disable", guard(authz.ScopeOps, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Actor string `json:"actor"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Actor == "" {
+			req.Actor = "admin"
+		}
+		if err := agentdir.NewService(st).Disable(r.PathValue("id"), req.Actor); err != nil {
+			apiErr(w, 400, 66401, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": "disabled"})
+	}))
+
+	// 动作登记（凭据只存引用，设计 §3.3）
+	mux.HandleFunc("GET /api/v1/agent-actions", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListAgentActions(r.URL.Query().Get("agent_id"))
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
+	})
+
+	mux.HandleFunc("PUT /api/v1/agent-actions", guard(authz.ScopeOps, func(w http.ResponseWriter, r *http.Request) {
+		var a store.AgentAction
+		if json.NewDecoder(r.Body).Decode(&a) != nil || a.AgentID == "" || a.ActionKey == "" || a.AdapterType == "" {
+			apiErr(w, 400, 66400, "agent_id/action_key/adapter_type required")
+			return
+		}
+		if len(a.ValidatorKeys) == 0 {
+			a.ValidatorKeys = []string{"manual_review"}
+		}
+		got, err := st.UpsertAgentAction(a)
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": got})
+	}))
+
+	// verified 目录（规划快照）
+	mux.HandleFunc("GET /api/v1/agent-catalog", func(w http.ResponseWriter, _ *http.Request) {
+		cat, err := agentdir.NewService(st).Catalog()
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": cat})
+	})
+
+	// 计划提交（ops）/ 批准（danger：冻结分派）
+	mux.HandleFunc("POST /api/v1/agent-plans", guard(authz.ScopeOps, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Draft  json.RawMessage `json:"draft"`
+			Source string          `json:"source"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil || len(req.Draft) == 0 {
+			apiErr(w, 400, 66400, "draft required")
+			return
+		}
+		if req.Source == "" {
+			req.Source = "manual"
+		}
+		d, err := plan.DecodeDraft(req.Draft)
+		if err != nil {
+			apiErr(w, 400, 66401, err.Error())
+			return
+		}
+		rev, err := agentSched.SubmitDraft(d, req.Source)
+		if err != nil {
+			apiErr(w, 400, 66401, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": rev})
+	}))
+
+	mux.HandleFunc("GET /api/v1/agent-plans", func(w http.ResponseWriter, r *http.Request) {
+		taskID := r.URL.Query().Get("task_id")
+		if taskID == "" {
+			apiErr(w, 400, 66400, "task_id required")
+			return
+		}
+		list, err := st.ListPlanRevisions(taskID)
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
+	})
+
+	mux.HandleFunc("POST /api/v1/agent-plans/{task_id}/revisions/{rev}/approve", guard(authz.ScopeDanger, func(w http.ResponseWriter, r *http.Request) {
+		rev, err := strconv.Atoi(r.PathValue("rev"))
+		if err != nil {
+			apiErr(w, 400, 66400, "invalid revision")
+			return
+		}
+		var req struct {
+			ApprovedBy string `json:"approved_by"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.ApprovedBy == "" {
+			req.ApprovedBy = "admin"
+		}
+		assignments, err := agentSched.Approve(r.PathValue("task_id"), rev, req.ApprovedBy)
+		if err != nil {
+			apiErr(w, 400, 66401, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": assignments})
+	}))
+
+	// V1.5 任务（read）
+	mux.HandleFunc("GET /api/v1/agent-tasks", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListAgentTasks(r.URL.Query().Get("status"))
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
+	})
+
+	mux.HandleFunc("GET /api/v1/agent-tasks/{id}/attempts", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListAttemptsByTask(r.PathValue("id"))
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
+	})
+
+	mux.HandleFunc("GET /api/v1/agent-tasks/{id}/artifacts", func(w http.ResponseWriter, r *http.Request) {
+		taskID := r.PathValue("id")
+		rev, _ := strconv.Atoi(r.URL.Query().Get("revision"))
+		if rev <= 0 {
+			rev = 1
+		}
+		out := []map[string]any{}
+		if assigns, err := st.ListTaskAssignments(taskID, rev); err == nil {
+			for _, a := range assigns {
+				if arts, err := st.ListArtifactsForStep(taskID, a.StepID, rev); err == nil {
+					for _, art := range arts {
+						out = append(out, map[string]any{"step_id": a.StepID, "uri": art.URI, "digest": art.Digest, "kind": art.Kind, "size_bytes": art.SizeBytes})
+					}
+				}
+			}
+		}
+		wj(w, map[string]any{"data": out})
+	})
+
+	mux.HandleFunc("POST /api/v1/agent-tasks/{id}/cancel", guard(authz.ScopeOps, func(w http.ResponseWriter, r *http.Request) {
+		n, err := agentSched.CancelAgentTask(r.PathValue("id"))
+		if err != nil {
+			apiErr(w, 400, 66401, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": map[string]any{"cancelled_attempts": n}})
+	}))
+
+	// 身份/批准审计（设计 §10）
+	mux.HandleFunc("GET /api/v1/agent-identity-audit", func(w http.ResponseWriter, r *http.Request) {
+		list, err := st.ListIdentityAudit(r.URL.Query().Get("agent_id"), 100)
+		if err != nil {
+			apiErr(w, 500, 66500, err.Error())
+			return
+		}
+		wj(w, map[string]any{"data": list})
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

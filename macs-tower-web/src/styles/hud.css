@@ -445,3 +445,14 @@ img[src$=".webp"], img[src$=".gif"] { display: none; }
 .lane-head { color: var(--hud-cyan, #1f9fb8); font-size: 11px; margin-bottom: 2px; }
 .lane-row { font-size: 12px; padding: 1px 0; }
 .timeline-row, .artifact-view p { font-size: 12px; padding: 1px 0; }
+
+/* ── V1.5 Agent 协作管理面（AgentCollabPanel）────────────── */
+.collab-panel { display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+.collab-h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
+.collab-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+.collab-row .panel-note { min-width: 44px; }
+.collab-edit { background: var(--panel-bg, rgba(255, 255, 255, 0.03)); border: 1px solid var(--line, rgba(255, 255, 255, 0.08)); border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
+.collab-issued { background: rgba(255, 200, 0, 0.08); border: 1px dashed rgba(255, 200, 0, 0.4); border-radius: 8px; padding: 8px 10px; margin: 6px 0; font-size: 12px; word-break: break-all; }
+.collab-audit { margin-top: 8px; }
+.collab-audit summary { cursor: pointer; }
+.collab-sel { outline: 1px solid var(--accent, rgba(80, 160, 255, 0.6)); }

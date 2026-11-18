@@ -18,18 +18,36 @@ import (
 // ---------- 类型（实施计划「跨任务接口基线」） ----------
 
 type Connector struct {
-	ID, Name, CredentialID, CredentialHash, ProtocolVersion string
-	OnlineStatus, HealthStatus, LoadJSON, LastSeen, RevokedAt string
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	CredentialID    string `json:"credential_id"`
+	CredentialHash  string `json:"credential_hash"`
+	ProtocolVersion string `json:"protocol_version"`
+	OnlineStatus    string `json:"online_status"`
+	HealthStatus    string `json:"health_status"`
+	LoadJSON        string `json:"load_json"`
+	LastSeen        string `json:"last_seen"`
+	RevokedAt       string `json:"revoked_at"`
 }
 
 type AgentInstance struct {
-	ID, ConnectorID, LocalAgentKey, DisplayName string
-	PlatformID, AdapterType                     string
-	RoleTags, CapabilityTags, EnvironmentTags   []string
-	IdentityStatus, VerifiedBy, VerifiedAt, OnlineStatus string
-	HealthStatus, LoadJSON                      string
-	Revision                                    int
-	ReportedJSON                                string
+	ID              string   `json:"id"`
+	ConnectorID     string   `json:"connector_id"`
+	LocalAgentKey   string   `json:"local_agent_key"`
+	DisplayName     string   `json:"display_name"`
+	PlatformID      string   `json:"platform_id"`
+	AdapterType     string   `json:"adapter_type"`
+	RoleTags        []string `json:"role_tags"`
+	CapabilityTags  []string `json:"capability_tags"`
+	EnvironmentTags []string `json:"environment_tags"`
+	IdentityStatus  string   `json:"identity_status"`
+	VerifiedBy      string   `json:"verified_by"`
+	VerifiedAt      string   `json:"verified_at"`
+	OnlineStatus    string   `json:"online_status"`
+	HealthStatus    string   `json:"health_status"`
+	LoadJSON        string   `json:"load_json"`
+	Revision        int      `json:"revision"`
+	ReportedJSON    string   `json:"reported_json"`
 }
 
 type Heartbeat struct {
@@ -37,55 +55,93 @@ type Heartbeat struct {
 }
 
 type AgentAction struct {
-	ID, AgentID, ActionKey, ActionKind, AdapterType string
-	RiskLevel, RetryPolicy                          string
-	MaxAttempts                                     int
-	ValidatorKeys                                   []string
-	ConfigRef                                       string
-	SecretRefs                                      []string
-	Enabled                                         bool
-	Revision                                        int
+	ID            string   `json:"id"`
+	AgentID       string   `json:"agent_id"`
+	ActionKey     string   `json:"action_key"`
+	ActionKind    string   `json:"action_kind"`
+	AdapterType   string   `json:"adapter_type"`
+	RiskLevel     string   `json:"risk_level"`
+	RetryPolicy   string   `json:"retry_policy"`
+	MaxAttempts   int      `json:"max_attempts"`
+	ValidatorKeys []string `json:"validator_keys"`
+	ConfigRef     string   `json:"config_ref"`
+	SecretRefs    []string `json:"secret_refs"`
+	Enabled       bool     `json:"enabled"`
+	Revision      int      `json:"revision"`
 }
 
 type PlanRevision struct {
-	TaskID        string
-	Revision      int
-	Source, Status, DraftJSON, CatalogDigest string
-	ApprovedBy, ApprovedAt                   string
+	TaskID        string `json:"task_id"`
+	Revision      int    `json:"revision"`
+	Source        string `json:"source"`
+	Status        string `json:"status"`
+	DraftJSON     string `json:"draft_json"`
+	CatalogDigest string `json:"catalog_digest"`
+	ApprovedBy    string `json:"approved_by"`
+	ApprovedAt    string `json:"approved_at"`
 }
 
 type TaskAssignment struct {
-	TaskID, StepID string
-	PlanRevision   int
-	AgentID, ActionID string
-	Environment, InputDigest, ApprovedBy, ApprovedAt string
+	TaskID       string `json:"task_id"`
+	StepID       string `json:"step_id"`
+	PlanRevision int    `json:"plan_revision"`
+	AgentID      string `json:"agent_id"`
+	ActionID     string `json:"action_id"`
+	Environment  string `json:"environment"`
+	InputDigest  string `json:"input_digest"`
+	ApprovedBy   string `json:"approved_by"`
+	ApprovedAt   string `json:"approved_at"`
 }
 
 type ExecutionAttempt struct {
-	AttemptID, TaskID, StepID string
-	PlanRevision, AttemptNo   int
-	IdempotencyKey, ExecutionContextID string
-	AgentID, ActionID, Environment, InputDigest string
-	Status, AcceptanceStatus           string
-	ResultJSON                         string
-	LeaseExpiresAt, CreatedAt, FinishedAt string
+	AttemptID          string `json:"attempt_id"`
+	TaskID             string `json:"task_id"`
+	StepID             string `json:"step_id"`
+	PlanRevision       int    `json:"plan_revision"`
+	AttemptNo          int    `json:"attempt_no"`
+	IdempotencyKey     string `json:"idempotency_key"`
+	ExecutionContextID string `json:"execution_context_id"`
+	AgentID            string `json:"agent_id"`
+	ActionID           string `json:"action_id"`
+	Environment        string `json:"environment"`
+	InputDigest        string `json:"input_digest"`
+	Status             string `json:"status"`
+	AcceptanceStatus   string `json:"acceptance_status"`
+	ResultJSON         string `json:"result_json"`
+	LeaseExpiresAt     string `json:"lease_expires_at"`
+	CreatedAt          string `json:"created_at"`
+	FinishedAt         string `json:"finished_at"`
 }
 
 type StoredArtifact struct {
-	ID, AttemptID, URI, Digest, Kind string
-	SizeBytes                        int64
-	CreatedAt                        string
+	ID        string `json:"id"`
+	AttemptID string `json:"attempt_id"`
+	URI       string `json:"uri"`
+	Digest    string `json:"digest"`
+	Kind      string `json:"kind"`
+	SizeBytes int64  `json:"size_bytes"`
+	CreatedAt string `json:"created_at"`
 }
 
 // AgentTask V1.5 任务级状态（plan_revisions 只承载不可变修订）
 type AgentTask struct {
-	TaskID, Title, Goal, Status string
-	CreatedAt, UpdatedAt        string
+	TaskID    string `json:"task_id"`
+	Title     string `json:"title"`
+	Goal      string `json:"goal"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // IdentityAuditEntry 人工标注/计划批准审计行（设计 §10）
 type IdentityAuditEntry struct {
-	ID, AgentID, TaskID, Actor, Action, PatchJSON, CreatedAt string
+	ID        string `json:"id"`
+	AgentID   string `json:"agent_id"`
+	TaskID    string `json:"task_id"`
+	Actor     string `json:"actor"`
+	Action    string `json:"action"`
+	PatchJSON string `json:"patch_json"`
+	CreatedAt string `json:"created_at"`
 }
 
 // ---------- JSON 标签序列化助手 ----------

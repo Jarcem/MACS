@@ -3,11 +3,12 @@
 
 // macs-incubator 孵化器（模块 #15/#16/#17/#18 + M3 质量 + M6 协议驱动）
 // 流程：注册（带令牌与协议驱动能力 §6.4.13.6）→ 收 dispatch
-//   → dispatch_inbox 幂等去重（6.2.4：重复消息直接回 ACK 不重复执行）
-//   → 回 ACK（accepted_subtask_id + available_slots，§6.4.8 统一 ACK 报文）
-//   → dispatch_commit / worker_rollback → 在跑子任务幂等销毁（E16）
-//   → 并发槽受限执行 + 自检报告 → execution_result（指纹 + 遥测）上行
-//   → 60s 周期 report（Q2）→ 断网离线缓冲 → 恢复后补传
+//
+//	→ dispatch_inbox 幂等去重（6.2.4：重复消息直接回 ACK 不重复执行）
+//	→ 回 ACK（accepted_subtask_id + available_slots，§6.4.8 统一 ACK 报文）
+//	→ dispatch_commit / worker_rollback → 在跑子任务幂等销毁（E16）
+//	→ 并发槽受限执行 + 自检报告 → execution_result（指纹 + 遥测）上行
+//	→ 60s 周期 report（Q2）→ 断网离线缓冲 → 恢复后补传
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -24,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"macs.local/incubator/internal/connector"
 	"macs.local/incubator/internal/probe"
 	"macs.local/incubator/internal/store"
 	"macs.local/incubator/internal/worker"
@@ -288,6 +291,29 @@ func main() {
 		}
 	}
 
+	// ── V1.5 Connector 模式（opt-in）：MACS_CONNECTOR_CONFIG 指向本机配置文件，
+	//    仅出站 WSS 连接塔侧 /agent/connect；与 2.x UDP 孵化器路径并存 ──
+	if cfgPath := os.Getenv("MACS_CONNECTOR_CONFIG"); cfgPath != "" {
+		ccfg, err := connector.LoadConfig(cfgPath)
+		if err != nil {
+			log.Fatalf("connector config: %v", err)
+		}
+		ob, err := connector.OpenOutbox(ccfg.DBPath)
+		if err != nil {
+			log.Fatalf("connector outbox: %v", err)
+		}
+		cl, err := connector.NewClient(ccfg, nil, ob, nil)
+		if err != nil {
+			log.Fatalf("connector client: %v", err)
+		}
+		go func() {
+			if err := cl.Run(context.Background()); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, connector.ErrPermanent) {
+				log.Printf("[connector] exited: %v", err)
+			}
+		}()
+		log.Printf("[connector] mode enabled → %s (connector_id=%s, agents=%d)", ccfg.TowerURL, ccfg.ConnectorID, len(ccfg.Agents))
+	}
+
 	// ── 模块 #15：监听调度下行 ──
 	laddr, _ := net.ResolveUDPAddr("udp4", ":"+port)
 	conn, err := net.ListenUDP("udp4", laddr)
@@ -420,7 +446,7 @@ func main() {
 				"max_workers": maxWorkers, "active_workers": m.ActiveCount,
 				"available_slots": maxWorkers - m.ActiveCount,
 			},
-			"load": m.LoadRatio, // 负载水位（6.4.7 评分依据，probe 已算好）
+			"load":    m.LoadRatio, // 负载水位（6.4.7 评分依据，probe 已算好）
 			"drivers": localDrivers(),
 		}
 		if err := send(newEnv("report", payload)); err != nil {
